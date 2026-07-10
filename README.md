@@ -15,6 +15,9 @@ Scripts/run-smoke-check.sh
 
 This machine's Command Line Tools do not expose XCTest or Swift Testing, so the
 repository uses a no-dependency executable behavior suite instead of `swift test`.
+The smoke check proves compilation plus core fake-adapter and extension-frame
+behavior. It does not prove real lid events, real CoreAudio control, or a loaded
+Chrome extension; use the manual verification below for those integrations.
 
 ## Run
 
@@ -50,4 +53,13 @@ requires you to explicitly enable an extension in Incognito windows; it is off b
 - macOS provides process-level audio activity. Exact Chrome tab attribution is
   supplied only while the bundled extension and native host are installed.
 - A built-in audio device may be shared by analog headphones on some hardware.
-  Verify your hardware route before relying on the guard with wired headphones.
+  LidMute fails closed and only mutes a built-in route whose current device name
+  clearly identifies it as a speaker. An unrecognized route is left untouched.
+
+## Manual Integration Check
+
+1. Start LidMute, enable the guard, and verify the menu-bar toggle remains usable after closing the window.
+2. With no wired headphones attached, use Simulate Lid Closed and confirm the event timeline shows mute enforcement.
+3. Load the Chrome extension and register its generated extension ID. Start media in a Youku tab and confirm the log includes its title, URL, window ID, and tab ID.
+4. Restart LidMute, then confirm the same Chrome `eventId` is not recorded again.
+5. Test wired headphones separately. If the app displays an unavailable target, it is intentionally refusing to alter an ambiguous shared built-in route.

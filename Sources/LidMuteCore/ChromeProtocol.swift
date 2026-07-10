@@ -11,6 +11,29 @@ public struct DecodedChromeFrame: Sendable {
     public let eventID: String
 }
 
+public final class ChromeEventDeduplicator: @unchecked Sendable {
+    private let url: URL
+    private let lock = NSLock()
+    private var eventIDs: Set<String>
+
+    public init(url: URL) {
+        self.url = url
+        eventIDs = Set((try? JSONDecoder().decode([String].self, from: Data(contentsOf: url))) ?? [])
+    }
+
+    public func accept(_ eventID: String) throws -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard eventIDs.insert(eventID).inserted else { return false }
+
+        let retained = Array(eventIDs.sorted().suffix(4_096))
+        eventIDs = Set(retained)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(retained).write(to: url, options: .atomic)
+        return true
+    }
+}
+
 public enum ChromeBridgeFrame {
     public static func decode(_ data: Data) throws -> DecodedChromeFrame {
         let frame = try JSONDecoder().decode(WireFrame.self, from: data)

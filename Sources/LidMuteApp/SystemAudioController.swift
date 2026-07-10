@@ -14,11 +14,13 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
             scope: kAudioObjectPropertyScopeGlobal
         )
         guard transport == kAudioDeviceTransportTypeBuiltIn else { return nil }
+        let name = try readString(objectID: deviceID, selector: kAudioObjectPropertyName)
+        guard isClearlyInternalSpeaker(named: name) else { return nil }
 
         return AudioDevice(
             id: deviceID,
             uid: try readString(objectID: deviceID, selector: kAudioDevicePropertyDeviceUID),
-            name: try readString(objectID: deviceID, selector: kAudioObjectPropertyName),
+            name: name,
             isBuiltIn: true
         )
     }
@@ -105,6 +107,11 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         )
     }
 
+    private func isClearlyInternalSpeaker(named name: String) -> Bool {
+        let normalized = name.lowercased()
+        return normalized.contains("speaker") || normalized.contains("扬声器") || normalized.contains("喇叭")
+    }
+
     private func hasProperty(_ objectID: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Bool {
         var address = address
         return AudioObjectHasProperty(objectID, &address)
@@ -145,11 +152,12 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
     }
 
     private func readString(objectID: AudioObjectID, selector: AudioObjectPropertySelector) throws -> String {
-        var value: CFString = "" as CFString
-        var size = UInt32(MemoryLayout<CFString?>.size)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         try check(AudioObjectGetPropertyData(objectID, &address, 0, nil, &size, &value))
-        return value as String
+        guard let value else { return "" }
+        return value.takeRetainedValue() as String
     }
 
     private func writeUInt32(_ value: UInt32, objectID: AudioObjectID, address: AudioObjectPropertyAddress) throws {

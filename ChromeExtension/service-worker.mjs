@@ -1,6 +1,7 @@
 const HOST_NAME = 'com.lidmute.nativehost';
 const OUTBOX_LIMIT = 256;
 let nativePort;
+var reconnectTimer;
 
 export function toAudibleFrame(tab, sessionId, seq) {
   return {
@@ -44,9 +45,24 @@ async function state() {
 function connect() {
   if (nativePort) return nativePort;
   nativePort = chrome.runtime.connectNative(HOST_NAME);
-  nativePort.onDisconnect.addListener(() => { nativePort = undefined; });
+  nativePort.onDisconnect.addListener(() => {
+    nativePort = undefined;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => void flushOutbox(), 1_000);
+  });
   nativePort.onMessage.addListener(acknowledge);
   return nativePort;
+}
+
+async function flushOutbox() {
+  const current = await state();
+  if (current.outbox.length === 0) return;
+  try {
+    const port = connect();
+    for (const event of current.outbox) port.postMessage(event);
+  } catch {
+    nativePort = undefined;
+  }
 }
 
 async function acknowledge(message) {
@@ -60,7 +76,7 @@ async function sendAudibleTab(tab) {
   const event = toAudibleFrame(tab, current.sessionId, Number(current.seq) + 1);
   const outbox = [...current.outbox, event].slice(-OUTBOX_LIMIT);
   await chrome.storage.session.set({ seq: Number(current.seq) + 1, outbox });
-  try { connect().postMessage(event); } catch { nativePort = undefined; }
+  await flushOutbox();
 }
 
 if (typeof chrome !== 'undefined') {
@@ -68,6 +84,8 @@ if (typeof chrome !== 'undefined') {
     if (changeInfo.audible === true) void sendAudibleTab(tab);
   });
   chrome.runtime.onStartup.addListener(async () => {
+    await flushOutbox();
     for (const tab of await chrome.tabs.query({ audible: true })) void sendAudibleTab(tab);
   });
+  chrome.runtime.onInstalled.addListener(() => void flushOutbox());
 }

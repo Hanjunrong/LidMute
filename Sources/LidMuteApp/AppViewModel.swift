@@ -12,6 +12,7 @@ final class AppViewModel: ObservableObject {
     private let coordinator: ProtectionCoordinator
     private let store: JSONLineEventStore
     private let inboxURL: URL
+    private let chromeDeduplicator: ChromeEventDeduplicator
     private var inboxOffset = 0
     private var audioTimer: Timer?
     private var inboxTimer: Timer?
@@ -22,6 +23,7 @@ final class AppViewModel: ObservableObject {
             .appending(path: "LidMute", directoryHint: .isDirectory)
         store = JSONLineEventStore(url: applicationSupport.appending(path: "events.jsonl"))
         inboxURL = applicationSupport.appending(path: "chrome-inbox.jsonl")
+        chromeDeduplicator = ChromeEventDeduplicator(url: applicationSupport.appending(path: "chrome-seen-event-ids.json"))
         coordinator = ProtectionCoordinator(audio: SystemAudioController(), store: store)
         coordinator.onEvent = { [weak self] _ in self?.refresh() }
         refresh()
@@ -76,7 +78,8 @@ final class AppViewModel: ObservableObject {
         let unread = data[inboxOffset...]
         inboxOffset = data.count
         for line in String(decoding: unread, as: UTF8.self).split(separator: "\n") {
-            guard let decoded = try? ChromeBridgeFrame.decode(Data(line.utf8)) else { continue }
+            guard let decoded = try? ChromeBridgeFrame.decode(Data(line.utf8)),
+                  (try? chromeDeduplicator.accept(decoded.eventID)) == true else { continue }
             chromeBridgeStatus = "已接收 Chrome 标签页事件"
             coordinator.receiveChromeEvidence(decoded.evidence)
         }

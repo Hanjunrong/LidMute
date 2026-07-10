@@ -9,10 +9,12 @@ struct LidMuteCoreBehaviorTests {
             try eventStoreReloadsValidLinesAndSkipsMalformedInput()
             try protectionRestoresCapturedSpeakerState()
             try chromeFrameCapturesAudibleTabDetails()
+            try chromeEventDeduplicatorPersistsAcceptedIDs()
             print("PASS Chrome tab evidence round-trips URL and identifiers")
             print("PASS JSONL store reloads valid records and skips malformed input")
             print("PASS protection mutes on close and restores on open")
             print("PASS Chrome audible frame retains tab-level details")
+            print("PASS Chrome event deduplication survives app restart")
         } catch {
             fputs("FAIL \(error)\n", stderr)
             exit(1)
@@ -83,6 +85,23 @@ struct LidMuteCoreBehaviorTests {
         let evidence = try ChromeBridgeFrame.decode(Data(json.utf8)).evidence
         guard evidence.tabID == 9, evidence.url == "https://v.youku.com", evidence.audible else {
             throw BehaviorTestError.expectationFailed("Chrome frame lost tab-level evidence")
+        }
+    }
+
+    private static func chromeEventDeduplicatorPersistsAcceptedIDs() throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "lidmute-seen-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let first = ChromeEventDeduplicator(url: url)
+        guard try first.accept("chrome-event-1") else {
+            throw BehaviorTestError.expectationFailed("first Chrome event should be accepted")
+        }
+        guard !(try first.accept("chrome-event-1")) else {
+            throw BehaviorTestError.expectationFailed("duplicate Chrome event should be rejected")
+        }
+        let restarted = ChromeEventDeduplicator(url: url)
+        guard !(try restarted.accept("chrome-event-1")) else {
+            throw BehaviorTestError.expectationFailed("persisted Chrome event should remain rejected after restart")
         }
     }
 }
