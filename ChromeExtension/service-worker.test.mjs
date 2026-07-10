@@ -16,7 +16,7 @@ test('serializes a Chrome audible event with tab-level evidence', () => {
   assert.equal(frame.seq, '42');
 });
 
-test('replays every retained event after a native-port reconnect', () => {
+test('replays every retained event through the outbox replay helper', () => {
   const posted = [];
   replayOutbox([{ eventId: 'one' }, { eventId: 'two' }], (event) => posted.push(event.eventId));
   assert.deepEqual(posted, ['one', 'two']);
