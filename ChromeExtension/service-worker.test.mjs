@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { toAudibleFrame } from './service-worker.mjs';
+import { replayOutbox, toAudibleFrame } from './service-worker.mjs';
 
 test('serializes a Chrome audible event with tab-level evidence', () => {
   const frame = toAudibleFrame({
@@ -14,4 +14,10 @@ test('serializes a Chrome audible event with tab-level evidence', () => {
   assert.equal(frame.tab.url, 'https://v.youku.com/v_show/id_example');
   assert.equal(frame.tab.audible, true);
   assert.equal(frame.seq, '42');
+});
+
+test('replays every retained event after a native-port reconnect', () => {
+  const posted = [];
+  replayOutbox([{ eventId: 'one' }, { eventId: 'two' }], (event) => posted.push(event.eventId));
+  assert.deepEqual(posted, ['one', 'two']);
 });

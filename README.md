@@ -53,8 +53,9 @@ requires you to explicitly enable an extension in Incognito windows; it is off b
 - macOS provides process-level audio activity. Exact Chrome tab attribution is
   supplied only while the bundled extension and native host are installed.
 - A built-in audio device may be shared by analog headphones on some hardware.
-  LidMute fails closed and only mutes a built-in route whose current device name
-  clearly identifies it as a speaker. An unrecognized route is left untouched.
+  LidMute fails closed and only mutes a built-in route whose current CoreAudio
+  output data source clearly identifies it as a speaker. An unrecognized route
+  is left untouched.
 
 ## Manual Integration Check
 

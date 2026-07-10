@@ -31,6 +31,10 @@ export function toAudibleFrame(tab, sessionId, seq) {
   };
 }
 
+export function replayOutbox(events, post) {
+  for (const event of events) post(event);
+}
+
 async function state() {
   const stored = await chrome.storage.session.get(['sessionId', 'seq', 'outbox']);
   if (!stored.sessionId) {
@@ -59,7 +63,7 @@ async function flushOutbox() {
   if (current.outbox.length === 0) return;
   try {
     const port = connect();
-    for (const event of current.outbox) port.postMessage(event);
+    replayOutbox(current.outbox, (event) => port.postMessage(event));
   } catch {
     nativePort = undefined;
   }

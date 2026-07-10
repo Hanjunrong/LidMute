@@ -15,7 +15,8 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         )
         guard transport == kAudioDeviceTransportTypeBuiltIn else { return nil }
         let name = try readString(objectID: deviceID, selector: kAudioObjectPropertyName)
-        guard isClearlyInternalSpeaker(named: name) else { return nil }
+        guard let dataSourceName = try currentOutputDataSourceName(for: deviceID),
+              isClearlyInternalSpeaker(named: dataSourceName) else { return nil }
 
         return AudioDevice(
             id: deviceID,
@@ -110,6 +111,28 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
     private func isClearlyInternalSpeaker(named name: String) -> Bool {
         let normalized = name.lowercased()
         return normalized.contains("speaker") || normalized.contains("扬声器") || normalized.contains("喇叭")
+    }
+
+    private func currentOutputDataSourceName(for deviceID: AudioDeviceID) throws -> String? {
+        let sourceAddress = outputAddress(kAudioDevicePropertyDataSource)
+        guard hasProperty(deviceID, sourceAddress) else { return nil }
+        var sourceID = try readUInt32(objectID: deviceID, address: sourceAddress)
+        var sourceName: Unmanaged<CFString>?
+        try withUnsafeMutablePointer(to: &sourceID) { sourcePointer in
+            try withUnsafeMutablePointer(to: &sourceName) { namePointer in
+                var translation = AudioValueTranslation(
+                    mInputData: UnsafeMutableRawPointer(sourcePointer),
+                    mInputDataSize: UInt32(MemoryLayout<UInt32>.size),
+                    mOutputData: UnsafeMutableRawPointer(namePointer),
+                    mOutputDataSize: UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+                )
+                var size = UInt32(MemoryLayout<AudioValueTranslation>.size)
+                var nameAddress = outputAddress(kAudioDevicePropertyDataSourceNameForIDCFString)
+                try check(AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &size, &translation))
+            }
+        }
+        guard let sourceName else { return nil }
+        return sourceName.takeRetainedValue() as String
     }
 
     private func hasProperty(_ objectID: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Bool {

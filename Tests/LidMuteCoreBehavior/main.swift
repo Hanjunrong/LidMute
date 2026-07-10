@@ -14,7 +14,7 @@ struct LidMuteCoreBehaviorTests {
             print("PASS JSONL store reloads valid records and skips malformed input")
             print("PASS protection mutes on close and restores on open")
             print("PASS Chrome audible frame retains tab-level details")
-            print("PASS Chrome event deduplication survives app restart")
+            print("PASS Chrome event deduplicator persists accepted IDs")
         } catch {
             fputs("FAIL \(error)\n", stderr)
             exit(1)
