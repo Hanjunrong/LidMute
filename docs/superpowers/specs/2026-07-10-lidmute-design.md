@@ -22,8 +22,9 @@ time, output device identifiers, and device volume/mute state. For Chrome, a
 bundled Manifest V3 extension supplements the system record with tab-level
 evidence: tab ID, window ID, title, committed URL, audible transition, muted
 state, and capture time. The extension uses Chrome Native Messaging through a
-separate `LidMuteNativeHost` executable that forwards framed JSON messages to
-the running app over a local Unix-domain socket.
+separate `LidMuteNativeHost` executable that validates and appends framed JSON
+messages to an application-private local inbox file. The running app polls that
+inbox, so speaker protection remains independent if Chrome is unavailable.
 
 ## User Experience
 
@@ -129,7 +130,7 @@ event ordering reproducible in tests.
 - Use public IOKit, CoreAudio, SwiftUI, AppKit, and Foundation APIs only.
 - No network services, telemetry, external dependencies, virtual audio drivers,
   or elevated privileges.
-- The bundled Chrome extension declares `tabs` and `nativeMessaging` only. The
+- The bundled Chrome extension declares `tabs`, `nativeMessaging`, and `storage` only. The
   host manifest's `allowed_origins` contains only the generated extension ID.
 - Chrome does not automatically grant extensions Incognito access. If Incognito
   tab evidence is required, the user must enable the extension's "Allow in

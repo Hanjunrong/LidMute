@@ -4,7 +4,7 @@
 
 **Goal:** Build a testable macOS menu-bar app that mutes only built-in speakers during a protected lid-closed interval and records process- and Chrome-tab-level audio events.
 
-**Architecture:** `LidMuteCore` contains pure models, JSONL persistence, protocol-backed adapters, the protection state machine, and the Chrome bridge decoder. `LidMuteApp` supplies SwiftUI/AppKit UI and production IOKit/CoreAudio/socket adapters. `LidMuteNativeHost` implements Chrome's framed-JSON stdio protocol and forwards validated frames to the app's Unix-domain socket. A Manifest V3 extension emits tab-audibility events.
+**Architecture:** `LidMuteCore` contains pure models, JSONL persistence, protocol-backed adapters, the protection state machine, and the Chrome bridge decoder. `LidMuteApp` supplies SwiftUI/AppKit UI and production IOKit/CoreAudio adapters. `LidMuteNativeHost` implements Chrome's framed-JSON stdio protocol and appends validated frames to the app-private inbox. A Manifest V3 extension emits tab-audibility events.
 
 **Tech Stack:** Swift 6.3, Swift Package Manager, SwiftUI, AppKit, Foundation, IOKit, CoreAudio, JavaScript (Node built-in test runner), Manifest V3.
 
@@ -15,7 +15,7 @@
 - Only built-in speakers are muted; no external output device is modified.
 - Store detailed events indefinitely in local JSON Lines and expose one confirmed clear action.
 - Chrome tab events include title, URL, window/tab IDs, audible/muted transitions, extension session ID, and correlation status.
-- Native Messaging uses `tabs` and `nativeMessaging`; the host accepts only the built extension ID.
+- Native Messaging uses `tabs`, `nativeMessaging`, and `storage`; the host accepts only the registered extension ID.
 - Tests precede production code for every independently testable behavior.
 
 ---
