@@ -38,7 +38,11 @@ notarization require a full Xcode installation and a Developer ID certificate.
 
 Turn on the guard, then use **模拟合盖** and **模拟开盖** to verify the state
 machine without physically closing the lid. Real lid-state polling occurs every
-second through IOKit while the app is running.
+second through IOKit while the app is running. The simulation defaults to the
+closed-lid state. On lid-open, LidMute restores the captured volume but keeps the
+built-in speaker muted. Manually disabling the guard, either while closed or
+after reopening, fully restores the mute and volume state captured before the
+protected interval.
 
 ## Chrome Tab-Level Logging
 
@@ -74,3 +78,4 @@ requires you to explicitly enable an extension in Incognito windows; it is off b
 3. Load the Chrome extension and register its generated extension ID. Start media in a Youku tab and confirm the log includes its title, URL, window ID, and tab ID.
 4. Restart LidMute, then confirm the same Chrome `eventId` is not recorded again.
 5. Test wired headphones separately. If the app displays an unavailable target, it is intentionally refusing to alter an ambiguous shared built-in route.
+6. Keep one audio process active for several seconds and confirm it creates one activation record instead of one record per polling interval.

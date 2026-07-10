@@ -30,11 +30,12 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         let muteAddress = outputAddress(kAudioDevicePropertyMute)
         let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
         let hasMute = hasProperty(device.id, muteAddress)
+        let hasWritableMute = hasMute && isSettable(device.id, muteAddress)
         let muted = hasMute ? (try readUInt32(objectID: device.id, address: muteAddress) != 0) : false
         let volume = hasProperty(device.id, volumeAddress)
             ? try readFloat(objectID: device.id, address: volumeAddress)
             : 1
-        return AudioDeviceState(muted: muted, volume: volume, usedVolumeFallback: !hasMute)
+        return AudioDeviceState(muted: muted, volume: volume, usedVolumeFallback: !hasWritableMute)
     }
 
     func enforceSilence(on device: AudioDevice) throws {
@@ -52,13 +53,18 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
     }
 
     func restore(_ state: AudioDeviceState, on device: AudioDevice) throws {
+        let muteAddress = outputAddress(kAudioDevicePropertyMute)
         let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
+
+        // Keep the route silent before raising its volume on lid-open restoration.
+        if state.muted, hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
+            try writeUInt32(1, objectID: device.id, address: muteAddress)
+        }
         if hasProperty(device.id, volumeAddress), isSettable(device.id, volumeAddress) {
             try writeFloat(state.volume, objectID: device.id, address: volumeAddress)
         }
 
-        let muteAddress = outputAddress(kAudioDevicePropertyMute)
-        if hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
+        if !state.muted, hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
             try writeUInt32(state.muted ? 1 : 0, objectID: device.id, address: muteAddress)
         }
     }

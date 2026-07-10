@@ -18,7 +18,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("LidMute")
                             .font(.system(size: 30, weight: .bold, design: .rounded))
-                        Text("合盖外放守卫")
+                        Text("合盖监控系统外放守卫")
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -40,8 +40,20 @@ struct ContentView: View {
                 .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(.white.opacity(0.4), lineWidth: 1))
 
                 HStack(spacing: 12) {
-                    Button("模拟合盖") { model.simulateLidClosed() }
-                    Button("模拟开盖") { model.simulateLidOpened() }
+                    SimulationButton(
+                        title: "模拟合盖",
+                        systemImage: "laptopcomputer",
+                        isSelected: model.simulatedLidState == .closed,
+                        tint: .orange,
+                        action: model.simulateLidClosed
+                    )
+                    SimulationButton(
+                        title: "模拟开盖",
+                        systemImage: "laptopcomputer.and.arrow.up",
+                        isSelected: model.simulatedLidState == .opened,
+                        tint: .cyan,
+                        action: model.simulateLidOpened
+                    )
                     Button("清空记录") { model.clearLog() }
                     Spacer()
                     Text(model.chromeBridgeStatus)
@@ -61,6 +73,31 @@ struct ContentView: View {
             .padding(24)
         }
         .frame(minWidth: 620, minHeight: 650)
+    }
+}
+
+private struct SimulationButton: View {
+    let title: String
+    let systemImage: String
+    let isSelected: Bool
+    let tint: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: isSelected ? "checkmark.circle.fill" : systemImage)
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 13)
+                .padding(.vertical, 8)
+                .foregroundStyle(isSelected ? .white : .primary.opacity(0.68))
+                .background(.ultraThinMaterial, in: Capsule())
+                .background((isSelected ? tint.opacity(0.76) : Color.gray.opacity(0.16)), in: Capsule())
+                .overlay(Capsule().stroke(isSelected ? tint.opacity(0.95) : .white.opacity(0.3), lineWidth: 1))
+                .shadow(color: isSelected ? tint.opacity(0.42) : .clear, radius: 9, y: 3)
+        }
+        .buttonStyle(.plain)
+        .disabled(isSelected)
+        .accessibilityValue(isSelected ? "已选择" : "未选择")
     }
 }
 

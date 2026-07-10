@@ -2,12 +2,18 @@ import Combine
 import Foundation
 import LidMuteCore
 
+enum SimulatedLidState {
+    case closed
+    case opened
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published var isEnabled = false
     @Published private(set) var statusText = "守卫未开启"
     @Published private(set) var events: [LidMuteEvent] = []
     @Published private(set) var chromeBridgeStatus = "等待 Chrome 扩展连接"
+    @Published private(set) var simulatedLidState: SimulatedLidState = .closed
 
     private let coordinator: ProtectionCoordinator
     private let store: JSONLineEventStore
@@ -17,6 +23,7 @@ final class AppViewModel: ObservableObject {
     private var audioTimer: Timer?
     private var inboxTimer: Timer?
     private var lidMonitor: SystemLidMonitor?
+    private var latestSystemLidClosed: Bool?
 
     init() {
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -35,35 +42,47 @@ final class AppViewModel: ObservableObject {
             monitor.start()
             lidMonitor = monitor
         }
-        audioTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let controller = SystemAudioController()
-                self.coordinator.receiveAudioSnapshot((try? controller.activeOutputProcesses()) ?? [])
+        if audioTimer == nil {
+            audioTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let controller = SystemAudioController()
+                    self.coordinator.receiveAudioSnapshot((try? controller.activeOutputProcesses()) ?? [])
+                }
             }
         }
-        inboxTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.drainChromeInbox() }
+        if inboxTimer == nil {
+            inboxTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.drainChromeInbox() }
+            }
         }
     }
 
     func setEnabled(_ enabled: Bool) {
         isEnabled = enabled
         coordinator.setEnabled(enabled)
+        if enabled, let latestSystemLidClosed {
+            coordinator.receiveLidState(closed: latestSystemLidClosed)
+        }
         refresh()
     }
 
     func receiveSystemLidState(_ closed: Bool) {
+        latestSystemLidClosed = closed
         coordinator.receiveLidState(closed: closed)
         refresh()
     }
 
     func simulateLidClosed() {
+        guard simulatedLidState != .closed else { return }
+        simulatedLidState = .closed
         coordinator.receiveLidState(closed: true, simulated: true)
         refresh()
     }
 
     func simulateLidOpened() {
+        guard simulatedLidState != .opened else { return }
+        simulatedLidState = .opened
         coordinator.receiveLidState(closed: false, simulated: true)
         refresh()
     }

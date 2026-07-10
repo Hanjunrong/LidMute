@@ -4,7 +4,7 @@
 
 Build a native macOS menu bar application that prevents the MacBook's built-in
 speakers from producing sound while the lid is closed, then restores the prior
-speaker state when the lid opens. It must retain detailed local records of
+volume while keeping the speaker muted when the lid opens. It must retain detailed local records of
 processes that output audio during the protected interval.
 
 ## Chosen Approach
@@ -12,8 +12,8 @@ processes that output audio during the protected interval.
 LidMute is a SwiftUI and AppKit application backed by public IOKit and CoreAudio
 APIs. A clamshell observer receives the lid state from `IOPMrootDomain`. An
 audio guard targets only the built-in speaker output device; it saves the
-device's prior mute and volume state, mutes it on close, and restores that exact
-state on open. The guard re-applies the mute whenever the device becomes active
+device's prior mute and volume state, mutes it on close, and restores the prior
+volume while keeping mute enabled on open. The guard re-applies the mute whenever the device becomes active
 or an audio process begins output while protection is active.
 
 The app uses CoreAudio process objects to report process-level audio activity.
@@ -58,12 +58,15 @@ inbox, so speaker protection remains independent if Chrome is unavailable.
 3. While the lid remains closed, monitor CoreAudio output-process state and the
    target device's running state. Every newly observed active audio process is
    logged and triggers another mute enforcement.
-4. On an armed lid-open event, restore only the values captured for the active
-   protection interval. Never overwrite a user state change made after opening.
-5. If the target device changes, disappears, or reports no controllable mute or
+4. On an armed lid-open event, restore the volume captured for the active
+   protection interval while keeping the built-in speaker muted. Never overwrite
+   a user state change made after opening.
+5. When the user disables the guard, fully restore the mute and volume state
+   captured before the first protected interval, including after a lid-open.
+6. If the target device changes, disappears, or reports no controllable mute or
    volume property, preserve the guard state, emit an explicit diagnostic event,
    and show the error in the UI.
-6. During protection, a Chrome tab that changes to `audible: true` emits a
+7. During protection, a Chrome tab that changes to `audible: true` emits a
    tab-level event immediately. The event is correlated with an active Chrome
    CoreAudio process when one is seen in the same short correlation window. If
    CoreAudio does not observe Chrome, the tab event remains valid but is marked
