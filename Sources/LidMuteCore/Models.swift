@@ -7,6 +7,17 @@ public enum ProtectionState: String, Codable, Sendable {
     case unavailable
 }
 
+public enum ProtectionSource: String, Codable, Hashable, Sendable {
+    case lid
+    case night
+}
+
+public enum MediaCommand: Int, Codable, CaseIterable, Sendable {
+    case previous = 20
+    case next = 19
+    case playPause = 16
+}
+
 public enum LidMuteEventKind: String, Codable, Sendable {
     case protectionEnabled
     case protectionDisabled
@@ -18,6 +29,9 @@ public enum LidMuteEventKind: String, Codable, Sendable {
     case chromeTabAudible
     case error
     case simulation
+    case nightProtectionStarted
+    case nightProtectionEnded
+    case mediaCommandSent
 }
 
 public enum CorrelationStatus: String, Codable, Sendable {

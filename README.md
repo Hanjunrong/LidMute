@@ -36,10 +36,17 @@ open dist/LidMute.app
 The generated bundle is unsigned and intended for local use. Code signing and
 notarization require a full Xcode installation and a Developer ID certificate.
 
+The app also provides a configurable Beijing-time screen-sleep schedule. When
+the guard is enabled, the display is asleep, and the current time is inside the
+configured interval (default `00:00-08:00`), the built-in speaker is muted. The
+schedule ending or disabling the guard restores the state captured before the
+night interval. The dashboard lists current CoreAudio output processes and
+sends system-level macOS previous, next, and play/pause media key events.
+
 Turn on the guard, then use **模拟合盖** and **模拟开盖** to verify the state
 machine without physically closing the lid. Real lid-state polling occurs every
-second through IOKit while the app is running. The simulation defaults to the
-closed-lid state. On lid-open, LidMute restores the captured volume but keeps the
+second through IOKit while the app is running. After reset, **模拟合盖** is the
+available action and **模拟开盖** is disabled. On lid-open, LidMute restores the captured volume but keeps the
 built-in speaker muted. Manually disabling the guard, either while closed or
 after reopening, fully restores the mute and volume state captured before the
 protected interval.

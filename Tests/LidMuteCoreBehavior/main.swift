@@ -11,6 +11,12 @@ struct LidMuteCoreBehaviorTests {
             try manualDisableFullyRestoresCapturedSpeakerState()
             try manualDisableAfterLidOpenFullyRestoresCapturedSpeakerState()
             try volumeFallbackKeepsOutputSilentOnLidOpen()
+            try enablingGuardDoesNotChangeCurrentAudioState()
+            try nightProtectionMutesOnlyWhenPolicyIsActive()
+            try nightProtectionRestoresWhenItEnds()
+            try nightEndDoesNotRestoreWhileLidIsClosed()
+            try nightScheduleHandlesBeijingTimeAcrossMidnight()
+            try mediaCommandsUseSystemKeyTypes()
             try repeatedAudioSnapshotsDoNotDuplicateLogEvents()
             try audioProcessCanBeLoggedAgainAfterStopping()
             try silenceErrorIsLoggedAgainAfterAudioRestarts()
@@ -22,6 +28,12 @@ struct LidMuteCoreBehaviorTests {
             print("PASS manual disable fully restores captured speaker state")
             print("PASS manual disable after lid-open fully restores captured speaker state")
             print("PASS volume fallback keeps output silent on lid-open")
+            print("PASS enabling guard does not change current audio state")
+            print("PASS night protection mutes only when policy is active")
+            print("PASS night protection restores when it ends")
+            print("PASS night end does not restore while lid is closed")
+            print("PASS night schedule handles Beijing time across midnight")
+            print("PASS media commands use system key types")
             print("PASS repeated audio snapshots do not duplicate log events")
             print("PASS stopped audio process can be logged after becoming active again")
             print("PASS silence error is logged again after audio restarts")
@@ -134,6 +146,88 @@ struct LidMuteCoreBehaviorTests {
         guard audio.lastMute == true, audio.lastVolume == 0 else {
             throw BehaviorTestError.expectationFailed("volume fallback restored an audible output level on lid-open")
         }
+    }
+
+    @MainActor
+    private static func enablingGuardDoesNotChangeCurrentAudioState() throws {
+        let audio = FakeAudioController()
+        let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+
+        coordinator.setEnabled(true)
+
+        guard audio.enforceSilenceCount == 0, audio.captureCount == 0,
+              audio.lastMute == false, audio.lastVolume == 0.72 else {
+            throw BehaviorTestError.expectationFailed("enabling the guard changed current audio state")
+        }
+    }
+
+    @MainActor
+    private static func nightProtectionMutesOnlyWhenPolicyIsActive() throws {
+        let audio = FakeAudioController()
+        let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+
+        coordinator.setEnabled(true)
+        coordinator.receiveNightProtection(false)
+        guard audio.enforceSilenceCount == 0 else {
+            throw BehaviorTestError.expectationFailed("inactive night policy muted the speaker")
+        }
+
+        coordinator.receiveNightProtection(true)
+        guard audio.enforceSilenceCount == 1, audio.lastMute == true else {
+            throw BehaviorTestError.expectationFailed("active night policy did not mute the speaker")
+        }
+    }
+
+    @MainActor
+    private static func nightProtectionRestoresWhenItEnds() throws {
+        let audio = FakeAudioController()
+        let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+
+        coordinator.setEnabled(true)
+        coordinator.receiveNightProtection(true)
+        coordinator.receiveNightProtection(false)
+
+        guard audio.lastMute == false, audio.lastVolume == 0.72 else {
+            throw BehaviorTestError.expectationFailed("night protection did not restore the captured state")
+        }
+    }
+
+    @MainActor
+    private static func nightEndDoesNotRestoreWhileLidIsClosed() throws {
+        let audio = FakeAudioController()
+        let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+
+        coordinator.setEnabled(true)
+        coordinator.receiveLidState(closed: true)
+        coordinator.receiveNightProtection(true)
+        coordinator.receiveNightProtection(false)
+
+        guard audio.lastMute == true else {
+            throw BehaviorTestError.expectationFailed("night end unmuted an actively closed lid")
+        }
+    }
+
+    private static func nightScheduleHandlesBeijingTimeAcrossMidnight() throws {
+        let schedule = NightSchedule(startMinutes: 23 * 60, endMinutes: 8 * 60)
+        guard schedule.isActive(at: beijingDate(hour: 23, minute: 30)),
+              schedule.isActive(at: beijingDate(hour: 1, minute: 30)),
+              !schedule.isActive(at: beijingDate(hour: 12)) else {
+            throw BehaviorTestError.expectationFailed("Beijing night schedule did not handle a cross-midnight interval")
+        }
+    }
+
+    private static func mediaCommandsUseSystemKeyTypes() throws {
+        guard MediaCommand.previous.rawValue == 20,
+              MediaCommand.next.rawValue == 19,
+              MediaCommand.playPause.rawValue == 16 else {
+            throw BehaviorTestError.expectationFailed("media command key types are not mapped to macOS system keys")
+        }
+    }
+
+    private static func beijingDate(hour: Int, minute: Int = 0) -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        return calendar.date(from: DateComponents(year: 2026, month: 7, day: 10, hour: hour, minute: minute))!
     }
 
     @MainActor
@@ -252,11 +346,15 @@ private final class FakeAudioController: AudioControlling, @unchecked Sendable {
     var capturedState = AudioDeviceState(muted: false, volume: 0.72, usedVolumeFallback: false)
     var enforceError: Error?
     private(set) var enforceSilenceCount = 0
-    var lastMute: Bool?
-    var lastVolume: Float?
+    private(set) var captureCount = 0
+    var lastMute: Bool? = false
+    var lastVolume: Float? = 0.72
 
     func builtInSpeaker() throws -> AudioDevice? { device }
-    func captureState(of device: AudioDevice) throws -> AudioDeviceState { capturedState }
+    func captureState(of device: AudioDevice) throws -> AudioDeviceState {
+        captureCount += 1
+        return capturedState
+    }
     func enforceSilence(on device: AudioDevice) throws {
         enforceSilenceCount += 1
         if let enforceError { throw enforceError }

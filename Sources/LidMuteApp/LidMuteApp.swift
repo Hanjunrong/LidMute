@@ -18,6 +18,7 @@ struct LidMuteApp: App {
                 .disabled(model.simulatedLidState == .closed)
             Button("模拟开盖", action: model.simulateLidOpened)
                 .disabled(model.simulatedLidState == .opened)
+            Button("重置模拟状态", action: model.resetSimulationState)
             Divider()
             Button("退出 LidMute") { NSApplication.shared.terminate(nil) }
         }

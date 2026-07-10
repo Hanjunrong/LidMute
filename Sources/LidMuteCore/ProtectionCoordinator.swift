@@ -12,6 +12,7 @@ public final class ProtectionCoordinator {
     private var targetDevice: AudioDevice?
     private var disableRestoreState: AudioDeviceState?
     private var disableRestoreDevice: AudioDevice?
+    private var activeSources: Set<ProtectionSource> = []
     private var observedLidClosed: Bool?
     private var activeOutputPIDs: Set<Int32> = []
     private var lastSilenceError: String?
@@ -27,11 +28,13 @@ public final class ProtectionCoordinator {
         isEnabled = enabled
         if !enabled {
             restoreForGuardDisable()
+            activeSources.removeAll()
             resetObservationState()
             state = .inactive
             record(.protectionDisabled, "守卫已关闭")
         } else {
             clearCapturedState()
+            activeSources.removeAll()
             resetObservationState()
             state = .armed
             record(.protectionEnabled, "守卫已开启，等待合盖")
@@ -47,11 +50,17 @@ public final class ProtectionCoordinator {
 
         if closed {
             record(simulated ? .simulation : .lidClosed, simulated ? "模拟合盖" : "检测到合盖")
-            armAndMute()
+            updateProtectionSource(.lid, active: true)
         } else {
             record(simulated ? .simulation : .lidOpened, simulated ? "模拟开盖" : "检测到开盖")
-            state = restoreForLidOpen() ? .armed : .unavailable
+            updateProtectionSource(.lid, active: false)
         }
+    }
+
+    public func receiveNightProtection(_ active: Bool) {
+        guard isEnabled else { return }
+        record(active ? .nightProtectionStarted : .nightProtectionEnded, active ? "进入夜间息屏静音时段" : "夜间息屏静音时段结束")
+        updateProtectionSource(.night, active: active)
     }
 
     public func receiveAudioSnapshot(_ processes: [AudioProcess]) {
@@ -125,6 +134,30 @@ public final class ProtectionCoordinator {
         }
     }
 
+    private func updateProtectionSource(_ source: ProtectionSource, active: Bool) {
+        let wasProtected = !activeSources.isEmpty
+        if active {
+            guard activeSources.insert(source).inserted else { return }
+            if wasProtected {
+                if let targetDevice { try? audio.enforceSilence(on: targetDevice) }
+            } else {
+                armAndMute()
+            }
+            return
+        }
+
+        guard activeSources.remove(source) != nil, activeSources.isEmpty else {
+            return
+        }
+
+        if source == .lid {
+            state = restoreForLidOpen() ? .armed : .unavailable
+        } else {
+            restoreForNightEnd()
+            state = .armed
+        }
+    }
+
     private func restoreForLidOpen() -> Bool {
         guard let savedState, let targetDevice else { return true }
         do {
@@ -149,13 +182,21 @@ public final class ProtectionCoordinator {
     }
 
     private func restoreForGuardDisable() {
+        restoreFullState(detail: "守卫关闭，已恢复内建扬声器合盖前状态")
+    }
+
+    private func restoreForNightEnd() {
+        restoreFullState(detail: "夜间息屏静音时段结束，已恢复进入时段前状态")
+    }
+
+    private func restoreFullState(detail: String) {
         guard let disableRestoreState, let disableRestoreDevice else {
             clearCapturedState()
             return
         }
         do {
             try audio.restore(disableRestoreState, on: disableRestoreDevice)
-            record(.restored, "守卫关闭，已恢复内建扬声器合盖前状态")
+            record(.restored, detail)
             clearCapturedState()
         } catch {
             record(.error, "无法恢复内建扬声器状态：\(error.localizedDescription)")
