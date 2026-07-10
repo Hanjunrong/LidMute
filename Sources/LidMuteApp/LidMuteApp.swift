@@ -9,6 +9,7 @@ struct LidMuteApp: App {
             ContentView(model: model)
                 .task { model.start() }
         }
+        .defaultSize(width: 980, height: 760)
         MenuBarExtra("LidMute", systemImage: model.isEnabled ? "speaker.slash.fill" : "speaker") {
             Button(model.isEnabled ? "关闭合盖监控系统外放守卫" : "开启合盖监控系统外放守卫") {
                 model.setEnabled(!model.isEnabled)

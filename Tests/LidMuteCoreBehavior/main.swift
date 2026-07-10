@@ -17,6 +17,7 @@ struct LidMuteCoreBehaviorTests {
             try nightEndDoesNotRestoreWhileLidIsClosed()
             try nightScheduleHandlesBeijingTimeAcrossMidnight()
             try mediaCommandsUseSystemKeyTypes()
+            try eventPresentationUsesReadableChineseLabels()
             try repeatedAudioSnapshotsDoNotDuplicateLogEvents()
             try audioProcessCanBeLoggedAgainAfterStopping()
             try silenceErrorIsLoggedAgainAfterAudioRestarts()
@@ -34,6 +35,7 @@ struct LidMuteCoreBehaviorTests {
             print("PASS night end does not restore while lid is closed")
             print("PASS night schedule handles Beijing time across midnight")
             print("PASS media commands use system key types")
+            print("PASS event presentation uses readable Chinese labels")
             print("PASS repeated audio snapshots do not duplicate log events")
             print("PASS stopped audio process can be logged after becoming active again")
             print("PASS silence error is logged again after audio restarts")
@@ -221,6 +223,16 @@ struct LidMuteCoreBehaviorTests {
               MediaCommand.next.rawValue == 19,
               MediaCommand.playPause.rawValue == 16 else {
             throw BehaviorTestError.expectationFailed("media command key types are not mapped to macOS system keys")
+        }
+    }
+
+    private static func eventPresentationUsesReadableChineseLabels() throws {
+        let detected = EventPresentation(kind: .audioProcessDetected)
+        let restored = EventPresentation(kind: .restored)
+        guard detected.title == "检测到音频输出",
+              detected.symbolName == "waveform.badge.exclamationmark",
+              restored.title == "扬声器状态已恢复" else {
+            throw BehaviorTestError.expectationFailed("event presentation is not human readable")
         }
     }
 
