@@ -26,6 +26,16 @@ CLANG_MODULE_CACHE_PATH=/tmp/lidmute-clang-cache \
 swift run --disable-sandbox --scratch-path /tmp/lidmute-build LidMuteApp
 ```
 
+To make a local `.app` bundle after a successful build:
+
+```zsh
+zsh Scripts/make-app-bundle.sh
+open dist/LidMute.app
+```
+
+The generated bundle is unsigned and intended for local use. Code signing and
+notarization require a full Xcode installation and a Developer ID certificate.
+
 Turn on the guard, then use **模拟合盖** and **模拟开盖** to verify the state
 machine without physically closing the lid. Real lid-state polling occurs every
 second through IOKit while the app is running.
