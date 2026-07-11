@@ -16,6 +16,7 @@ struct LidMuteCoreBehaviorTests {
             try nightProtectionRestoresWhenItEnds()
             try nightEndDoesNotRestoreWhileLidIsClosed()
             try nightScheduleHandlesBeijingTimeAcrossMidnight()
+            try nightProtectionPreferencesPreserveLastValidSchedule()
             try mediaCommandsUseSystemKeyTypes()
             try eventPresentationUsesReadableChineseLabels()
             try mediaPauseRequestRetainsEvidenceAndReadablePresentation()
@@ -39,6 +40,7 @@ struct LidMuteCoreBehaviorTests {
             print("PASS night protection restores when it ends")
             print("PASS night end does not restore while lid is closed")
             print("PASS night schedule handles Beijing time across midnight")
+            print("PASS night protection preferences preserve the last valid schedule")
             print("PASS media commands use system key types")
             print("PASS event presentation uses readable Chinese labels")
             print("PASS media pause requests retain evidence and readable presentation")
@@ -225,6 +227,39 @@ struct LidMuteCoreBehaviorTests {
               schedule.isActive(at: beijingDate(hour: 1, minute: 30)),
               !schedule.isActive(at: beijingDate(hour: 12)) else {
             throw BehaviorTestError.expectationFailed("Beijing night schedule did not handle a cross-midnight interval")
+        }
+    }
+
+    private static func nightProtectionPreferencesPreserveLastValidSchedule() throws {
+        let suiteName = "LidMuteTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            throw BehaviorTestError.expectationFailed("could not create isolated defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferences = NightProtectionPreferences(defaults: defaults)
+
+        guard preferences.load() == NightProtectionConfiguration(
+            enabled: false,
+            startText: "00:00",
+            endText: "08:00"
+        ) else {
+            throw BehaviorTestError.expectationFailed("night preferences did not provide defaults")
+        }
+
+        preferences.saveEnabled(true)
+        guard preferences.saveSchedule(startText: "23:30", endText: "07:15") else {
+            throw BehaviorTestError.expectationFailed("valid night schedule was rejected")
+        }
+        guard !preferences.saveSchedule(startText: "25:00", endText: "07:15") else {
+            throw BehaviorTestError.expectationFailed("invalid night schedule was persisted")
+        }
+
+        guard preferences.load() == NightProtectionConfiguration(
+            enabled: true,
+            startText: "23:30",
+            endText: "07:15"
+        ) else {
+            throw BehaviorTestError.expectationFailed("invalid edit replaced the last valid schedule")
         }
     }
 
