@@ -19,6 +19,9 @@ struct LidMuteCoreBehaviorTests {
             try mediaCommandsUseSystemKeyTypes()
             try eventPresentationUsesReadableChineseLabels()
             try mediaPauseRequestRetainsEvidenceAndReadablePresentation()
+            try protectedSourcesRequestPauseOnlyWithChromeEvidence()
+            try protectionExitNeverRequestsMediaPlayback()
+            try chromePauseRequestsUseGlobalDebounce()
             try repeatedAudioSnapshotsDoNotDuplicateLogEvents()
             try audioProcessCanBeLoggedAgainAfterStopping()
             try silenceErrorIsLoggedAgainAfterAudioRestarts()
@@ -38,6 +41,9 @@ struct LidMuteCoreBehaviorTests {
             print("PASS media commands use system key types")
             print("PASS event presentation uses readable Chinese labels")
             print("PASS media pause requests retain evidence and readable presentation")
+            print("PASS protected sources request pause only with Chrome evidence")
+            print("PASS protection exit never requests media playback")
+            print("PASS Chrome pause requests use global debounce")
             print("PASS repeated audio snapshots do not duplicate log events")
             print("PASS stopped audio process can be logged after becoming active again")
             print("PASS silence error is logged again after audio restarts")
@@ -259,6 +265,103 @@ struct LidMuteCoreBehaviorTests {
         }
     }
 
+    @MainActor
+    private static func protectedSourcesRequestPauseOnlyWithChromeEvidence() throws {
+        let cases: [(MediaPauseTrigger, ProtectionSource, @MainActor (ProtectionCoordinator) -> Void)] = [
+            (.lidProtectionStarted, .lid, { $0.receiveLidState(closed: true) }),
+            (.simulatedLidProtectionStarted, .lid, { $0.receiveLidState(closed: true, simulated: true) }),
+            (.nightProtectionStarted, .night, { $0.receiveNightProtection(true) }),
+        ]
+
+        for (expectedTrigger, source, activate) in cases {
+            let audio = FakeAudioController()
+            audio.activeProcesses = [activeProcess(pid: 1357)]
+            let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+            var requests: [MediaPauseRequest] = []
+            coordinator.onMediaPauseRequest = { requests.append($0) }
+
+            coordinator.setEnabled(true)
+            activate(coordinator)
+
+            guard requests.count == 1,
+                  requests[0].trigger == expectedTrigger,
+                  requests[0].source == source,
+                  requests[0].process?.bundleID == "com.google.Chrome" else {
+                throw BehaviorTestError.expectationFailed("protected source did not request one evidence-backed pause")
+            }
+        }
+
+        let silentCoordinator = ProtectionCoordinator(audio: FakeAudioController(), store: MemoryEventStore())
+        var silentRequests = 0
+        silentCoordinator.onMediaPauseRequest = { _ in silentRequests += 1 }
+        silentCoordinator.setEnabled(true)
+        silentCoordinator.receiveLidState(closed: true)
+        guard silentRequests == 0 else {
+            throw BehaviorTestError.expectationFailed("protection requested pause without Chrome audio evidence")
+        }
+    }
+
+    @MainActor
+    private static func protectionExitNeverRequestsMediaPlayback() throws {
+        let audio = FakeAudioController()
+        audio.activeProcesses = [activeProcess(pid: 1357)]
+        let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+        var requestCount = 0
+        coordinator.onMediaPauseRequest = { _ in requestCount += 1 }
+
+        coordinator.setEnabled(true)
+        coordinator.receiveLidState(closed: true)
+        let countWhileProtected = requestCount
+        coordinator.receiveLidState(closed: false)
+        coordinator.setEnabled(false)
+
+        guard requestCount == countWhileProtected else {
+            throw BehaviorTestError.expectationFailed("protection exit sent a media command")
+        }
+    }
+
+    @MainActor
+    private static func chromePauseRequestsUseGlobalDebounce() throws {
+        var clock = Date(timeIntervalSince1970: 1_000)
+        let coordinator = ProtectionCoordinator(
+            audio: FakeAudioController(),
+            store: MemoryEventStore(),
+            mediaPauseDebounce: 3,
+            now: { clock }
+        )
+        var requests: [MediaPauseRequest] = []
+        coordinator.onMediaPauseRequest = { requests.append($0) }
+        let evidence = ChromeTabEvidence(
+            sessionID: "s",
+            windowID: 1,
+            tabID: 2,
+            index: 0,
+            title: "优酷",
+            url: "https://v.youku.com",
+            audible: true,
+            muted: false,
+            isActive: true,
+            isPinned: false,
+            isIncognito: false
+        )
+
+        coordinator.setEnabled(true)
+        coordinator.receiveLidState(closed: true)
+        coordinator.receiveChromeEvidence(evidence)
+        coordinator.receiveChromeEvidence(evidence)
+        guard requests.count == 1 else {
+            throw BehaviorTestError.expectationFailed("Chrome pause request ignored debounce")
+        }
+
+        clock = clock.addingTimeInterval(3.1)
+        coordinator.receiveChromeEvidence(evidence)
+        guard requests.count == 2,
+              requests[1].trigger == .chromeAudioStarted,
+              requests[1].chromeTab == evidence else {
+            throw BehaviorTestError.expectationFailed("fresh Chrome event did not request pause after debounce")
+        }
+    }
+
     private static func beijingDate(hour: Int, minute: Int = 0) -> Date {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
@@ -380,6 +483,7 @@ private final class FakeAudioController: AudioControlling, @unchecked Sendable {
     private let device = AudioDevice(id: 1, uid: "built-in", name: "Built-in Speakers", isBuiltIn: true)
     var capturedState = AudioDeviceState(muted: false, volume: 0.72, usedVolumeFallback: false)
     var enforceError: Error?
+    var activeProcesses: [AudioProcess] = []
     private(set) var enforceSilenceCount = 0
     private(set) var captureCount = 0
     var lastMute: Bool? = false
@@ -396,5 +500,5 @@ private final class FakeAudioController: AudioControlling, @unchecked Sendable {
         lastMute = true
     }
     func restore(_ state: AudioDeviceState, on device: AudioDevice) throws { lastMute = state.muted; lastVolume = state.volume }
-    func activeOutputProcesses() throws -> [AudioProcess] { [] }
+    func activeOutputProcesses() throws -> [AudioProcess] { activeProcesses }
 }
