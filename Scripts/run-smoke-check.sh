@@ -23,4 +23,7 @@ file dist/LidMute.app/Contents/Resources/AppIcon.icns | grep -q "Mac OS X icon"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' dist/LidMute.app/Contents/Info.plist)" = "AppIcon"
 test -f dist/LidMute.app/Contents/Resources/ChromeExtension/manifest.json
 test ! -e dist/LidMute.app/Contents/Resources/ChromeExtension/ChromeExtension
+! grep -q "应用时间" Sources/LidMuteApp/ContentView.swift
+grep -q "private struct SimulationCard" Sources/LidMuteApp/ContentView.swift
+grep -Fq ".disabled(!model.isEnabled)" Sources/LidMuteApp/ContentView.swift
 print "PASS LidMute smoke check"

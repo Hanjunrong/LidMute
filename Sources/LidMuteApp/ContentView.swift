@@ -19,14 +19,16 @@ struct ContentView: View {
                     NowPlayingCard(model: model)
                         .frame(maxWidth: .infinity)
                 }
-                .frame(height: 244)
+                .frame(height: 210)
+
+                SimulationCard(model: model)
 
                 ActivityTimeline(model: model)
                     .frame(maxHeight: .infinity)
             }
             .padding(22)
         }
-        .frame(minWidth: 900, minHeight: 700)
+        .frame(minWidth: 900, minHeight: 780)
     }
 }
 
@@ -164,12 +166,19 @@ private struct AutomationCard: View {
             HStack {
                 CardTitle(title: "自动保护", subtitle: "合盖与夜间策略", systemImage: "sparkles")
                 Spacer()
-                Toggle("", isOn: $model.nightScheduleEnabled)
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { model.nightScheduleEnabled },
+                        set: { model.setNightScheduleEnabled($0) }
+                    )
+                )
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .tint(AmberVisualTheme.amber)
                     .accessibilityLabel("息屏夜间静音")
                     .accessibilityValue(model.nightScheduleEnabled ? "已开启" : "已关闭")
+                    .disabled(!model.isEnabled)
             }
 
             HStack(spacing: 9) {
@@ -180,6 +189,8 @@ private struct AutomationCard: View {
                     .padding(.vertical, 8)
                     .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(.white.opacity(0.18)))
+                    .onChange(of: model.nightStartText) { _, _ in model.nightScheduleTextChanged() }
+                    .disabled(!model.isEnabled)
 
                 Image(systemName: "arrow.right")
                     .font(.caption.weight(.bold))
@@ -192,15 +203,8 @@ private struct AutomationCard: View {
                     .padding(.vertical, 8)
                     .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(.white.opacity(0.18)))
-
-                Button("应用时间") { model.applyNightSchedule() }
-                    .buttonStyle(
-                        LiquidGlassButtonStyle(
-                            tint: AmberVisualTheme.seaGlass,
-                            isEmphasized: false,
-                            shape: .roundedRectangle
-                        )
-                    )
+                    .onChange(of: model.nightEndText) { _, _ in model.nightScheduleTextChanged() }
+                    .disabled(!model.isEnabled)
             }
 
             Text("\(model.nightScheduleStatus) · \(model.isDisplaySleeping ? "当前息屏" : "当前亮屏")")
@@ -208,7 +212,20 @@ private struct AutomationCard: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            Divider().opacity(0.35)
+        }
+        .opacity(model.isEnabled ? 1 : 0.62)
+        .amberGlassCard()
+    }
+}
+
+private struct SimulationCard: View {
+    @ObservedObject var model: AppViewModel
+
+    var body: some View {
+        HStack(spacing: 16) {
+            CardTitle(title: "模拟测试", subtitle: "独立验证合盖状态", systemImage: "testtube.2")
+
+            Spacer()
 
             HStack(spacing: 9) {
                 Button {
@@ -259,7 +276,7 @@ private struct AutomationCard: View {
                 .accessibilityLabel("重置模拟状态")
             }
         }
-        .amberGlassCard()
+        .amberGlassCard(padding: 16, cornerRadius: 22)
     }
 }
 

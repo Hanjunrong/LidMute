@@ -155,11 +155,6 @@ final class AppViewModel: ObservableObject {
         refreshNightProtection()
     }
 
-    func applyNightSchedule() {
-        nightPreferences.saveEnabled(nightScheduleEnabled)
-        nightScheduleTextChanged()
-    }
-
     func sendMediaCommand(_ command: MediaCommand) {
         do {
             try mediaController.send(command)
