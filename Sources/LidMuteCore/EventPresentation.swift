@@ -30,6 +30,10 @@ public struct EventPresentation: Equatable, Sendable {
             (title, symbolName) = ("夜间保护已结束", "sunrise.fill")
         case .mediaCommandSent:
             (title, symbolName) = ("媒体命令已发送", "playpause.fill")
+        case .mediaPauseRequested:
+            (title, symbolName) = ("已请求系统暂停", "pause.circle.fill")
+        case .mediaPauseRequestFailed:
+            (title, symbolName) = ("系统暂停请求失败", "exclamationmark.circle.fill")
         }
     }
 }

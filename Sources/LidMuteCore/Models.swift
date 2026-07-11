@@ -18,6 +18,13 @@ public enum MediaCommand: Int, Codable, CaseIterable, Sendable {
     case playPause = 16
 }
 
+public enum MediaPauseTrigger: String, Codable, Sendable {
+    case lidProtectionStarted
+    case simulatedLidProtectionStarted
+    case nightProtectionStarted
+    case chromeAudioStarted
+}
+
 public enum LidMuteEventKind: String, Codable, Sendable {
     case protectionEnabled
     case protectionDisabled
@@ -32,6 +39,8 @@ public enum LidMuteEventKind: String, Codable, Sendable {
     case nightProtectionStarted
     case nightProtectionEnded
     case mediaCommandSent
+    case mediaPauseRequested
+    case mediaPauseRequestFailed
 }
 
 public enum CorrelationStatus: String, Codable, Sendable {
@@ -121,6 +130,31 @@ public struct ChromeTabEvidence: Codable, Equatable, Sendable {
         self.isActive = isActive
         self.isPinned = isPinned
         self.isIncognito = isIncognito
+    }
+}
+
+public struct MediaPauseRequest: Equatable, Sendable {
+    public let id: UUID
+    public let trigger: MediaPauseTrigger
+    public let source: ProtectionSource?
+    public let process: AudioProcess?
+    public let chromeTab: ChromeTabEvidence?
+    public let correlation: CorrelationStatus
+
+    public init(
+        id: UUID = UUID(),
+        trigger: MediaPauseTrigger,
+        source: ProtectionSource?,
+        process: AudioProcess?,
+        chromeTab: ChromeTabEvidence?,
+        correlation: CorrelationStatus
+    ) {
+        self.id = id
+        self.trigger = trigger
+        self.source = source
+        self.process = process
+        self.chromeTab = chromeTab
+        self.correlation = correlation
     }
 }
 

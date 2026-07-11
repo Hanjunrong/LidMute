@@ -18,6 +18,7 @@ struct LidMuteCoreBehaviorTests {
             try nightScheduleHandlesBeijingTimeAcrossMidnight()
             try mediaCommandsUseSystemKeyTypes()
             try eventPresentationUsesReadableChineseLabels()
+            try mediaPauseRequestRetainsEvidenceAndReadablePresentation()
             try repeatedAudioSnapshotsDoNotDuplicateLogEvents()
             try audioProcessCanBeLoggedAgainAfterStopping()
             try silenceErrorIsLoggedAgainAfterAudioRestarts()
@@ -36,6 +37,7 @@ struct LidMuteCoreBehaviorTests {
             print("PASS night schedule handles Beijing time across midnight")
             print("PASS media commands use system key types")
             print("PASS event presentation uses readable Chinese labels")
+            print("PASS media pause requests retain evidence and readable presentation")
             print("PASS repeated audio snapshots do not duplicate log events")
             print("PASS stopped audio process can be logged after becoming active again")
             print("PASS silence error is logged again after audio restarts")
@@ -233,6 +235,27 @@ struct LidMuteCoreBehaviorTests {
               detected.symbolName == "waveform.badge.exclamationmark",
               restored.title == "扬声器状态已恢复" else {
             throw BehaviorTestError.expectationFailed("event presentation is not human readable")
+        }
+    }
+
+    private static func mediaPauseRequestRetainsEvidenceAndReadablePresentation() throws {
+        let process = activeProcess(pid: 1357)
+        let request = MediaPauseRequest(
+            trigger: .lidProtectionStarted,
+            source: .lid,
+            process: process,
+            chromeTab: nil,
+            correlation: .systemMatched
+        )
+        let sent = EventPresentation(kind: .mediaPauseRequested)
+        let failed = EventPresentation(kind: .mediaPauseRequestFailed)
+
+        guard request.source == .lid,
+              request.process == process,
+              sent.title == "已请求系统暂停",
+              sent.symbolName == "pause.circle.fill",
+              failed.title == "系统暂停请求失败" else {
+            throw BehaviorTestError.expectationFailed("media pause request model or presentation lost evidence")
         }
     }
 
