@@ -35,7 +35,8 @@ final class AppViewModel: ObservableObject {
     private var displayMonitor: SystemDisplayMonitor?
     private var latestSystemLidClosed: Bool?
     private let mediaController = SystemMediaController()
-    private let settings = UserDefaults.standard
+    private let nightPreferences = NightProtectionPreferences()
+    private var effectiveNightSchedule = NightSchedule(startMinutes: 0, endMinutes: 8 * 60)
 
     init() {
         let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -44,9 +45,14 @@ final class AppViewModel: ObservableObject {
         inboxURL = applicationSupport.appending(path: "chrome-inbox.jsonl")
         chromeDeduplicator = ChromeEventDeduplicator(url: applicationSupport.appending(path: "chrome-seen-event-ids.json"))
         coordinator = ProtectionCoordinator(audio: SystemAudioController(), store: store)
-        nightScheduleEnabled = settings.bool(forKey: "nightScheduleEnabled")
-        nightStartText = settings.string(forKey: "nightStart") ?? "00:00"
-        nightEndText = settings.string(forKey: "nightEnd") ?? "08:00"
+        let nightConfiguration = nightPreferences.load()
+        nightScheduleEnabled = nightConfiguration.enabled
+        nightStartText = nightConfiguration.startText
+        nightEndText = nightConfiguration.endText
+        effectiveNightSchedule = NightSchedule(
+            startMinutes: NightProtectionPreferences.minutes(from: nightConfiguration.startText) ?? 0,
+            endMinutes: NightProtectionPreferences.minutes(from: nightConfiguration.endText) ?? 8 * 60
+        )
         coordinator.onEvent = { [weak self] _ in self?.refresh() }
         coordinator.onMediaPauseRequest = { [weak self] request in
             self?.handleMediaPauseRequest(request)
@@ -134,11 +140,24 @@ final class AppViewModel: ObservableObject {
         refresh()
     }
 
-    func applyNightSchedule() {
-        settings.set(nightScheduleEnabled, forKey: "nightScheduleEnabled")
-        settings.set(nightStartText, forKey: "nightStart")
-        settings.set(nightEndText, forKey: "nightEnd")
+    func setNightScheduleEnabled(_ enabled: Bool) {
+        nightScheduleEnabled = enabled
+        nightPreferences.saveEnabled(enabled)
         refreshNightProtection()
+    }
+
+    func nightScheduleTextChanged() {
+        if nightPreferences.saveSchedule(startText: nightStartText, endText: nightEndText),
+           let startMinutes = NightProtectionPreferences.minutes(from: nightStartText),
+           let endMinutes = NightProtectionPreferences.minutes(from: nightEndText) {
+            effectiveNightSchedule = NightSchedule(startMinutes: startMinutes, endMinutes: endMinutes)
+        }
+        refreshNightProtection()
+    }
+
+    func applyNightSchedule() {
+        nightPreferences.saveEnabled(nightScheduleEnabled)
+        nightScheduleTextChanged()
     }
 
     func sendMediaCommand(_ command: MediaCommand) {
@@ -176,28 +195,17 @@ final class AppViewModel: ObservableObject {
     }
 
     private func refreshNightProtection() {
-        let schedule = NightSchedule(
-            startMinutes: minutes(from: nightStartText) ?? 0,
-            endMinutes: minutes(from: nightEndText) ?? 8 * 60
-        )
-        let validTime = minutes(from: nightStartText) != nil && minutes(from: nightEndText) != nil
+        let validTime = NightProtectionPreferences.minutes(from: nightStartText) != nil &&
+            NightProtectionPreferences.minutes(from: nightEndText) != nil
         nightScheduleStatus = validTime
             ? (nightScheduleEnabled ? "夜间时段：\(nightStartText)-\(nightEndText)（北京时间）" : "夜间静音未开启")
             : "时间格式应为 HH:mm"
 
-        let shouldProtect = isEnabled && nightScheduleEnabled && isDisplaySleeping && validTime && schedule.isActive(at: Date())
+        let shouldProtect = isEnabled && nightScheduleEnabled && isDisplaySleeping && effectiveNightSchedule.isActive(at: Date())
         guard shouldProtect != isNightProtectionActive else { return }
         isNightProtectionActive = shouldProtect
         coordinator.receiveNightProtection(shouldProtect)
         refresh()
-    }
-
-    private func minutes(from text: String) -> Int? {
-        let parts = text.split(separator: ":")
-        guard parts.count == 2,
-              let hour = Int(parts[0]), let minute = Int(parts[1]),
-              (0...23).contains(hour), (0...59).contains(minute) else { return nil }
-        return hour * 60 + minute
     }
 
     private func mediaCommandName(_ command: MediaCommand) -> String {
