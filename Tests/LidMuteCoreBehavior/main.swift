@@ -22,6 +22,7 @@ struct LidMuteCoreBehaviorTests {
             try protectedSourcesRequestPauseOnlyWithChromeEvidence()
             try protectionExitNeverRequestsMediaPlayback()
             try chromePauseRequestsUseGlobalDebounce()
+            try mediaPauseResultsUseHonestEventWording()
             try repeatedAudioSnapshotsDoNotDuplicateLogEvents()
             try audioProcessCanBeLoggedAgainAfterStopping()
             try silenceErrorIsLoggedAgainAfterAudioRestarts()
@@ -44,6 +45,7 @@ struct LidMuteCoreBehaviorTests {
             print("PASS protected sources request pause only with Chrome evidence")
             print("PASS protection exit never requests media playback")
             print("PASS Chrome pause requests use global debounce")
+            print("PASS media pause results use honest event wording")
             print("PASS repeated audio snapshots do not duplicate log events")
             print("PASS stopped audio process can be logged after becoming active again")
             print("PASS silence error is logged again after audio restarts")
@@ -359,6 +361,31 @@ struct LidMuteCoreBehaviorTests {
               requests[1].trigger == .chromeAudioStarted,
               requests[1].chromeTab == evidence else {
             throw BehaviorTestError.expectationFailed("fresh Chrome event did not request pause after debounce")
+        }
+    }
+
+    @MainActor
+    private static func mediaPauseResultsUseHonestEventWording() throws {
+        let store = MemoryEventStore()
+        let coordinator = ProtectionCoordinator(audio: FakeAudioController(), store: store)
+        let request = MediaPauseRequest(
+            trigger: .lidProtectionStarted,
+            source: .lid,
+            process: activeProcess(pid: 1357),
+            chromeTab: nil,
+            correlation: .systemMatched
+        )
+
+        coordinator.recordMediaPauseResult(request, errorDescription: nil)
+        coordinator.recordMediaPauseResult(request, errorDescription: "event failed")
+
+        guard store.events.count == 2,
+              store.events[0].kind == .mediaPauseRequested,
+              store.events[0].detail.contains("已发送系统暂停请求"),
+              !store.events[0].detail.contains("网页已暂停"),
+              store.events[1].kind == .mediaPauseRequestFailed,
+              store.events[1].detail.contains("event failed") else {
+            throw BehaviorTestError.expectationFailed("media pause result log overclaimed or lost failure details")
         }
     }
 

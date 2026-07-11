@@ -151,6 +151,34 @@ public final class ProtectionCoordinator {
         }
     }
 
+    public func recordMediaPauseResult(_ request: MediaPauseRequest, errorDescription: String?) {
+        let sourceDetail: String
+        switch request.trigger {
+        case .lidProtectionStarted: sourceDetail = "真实合盖保护"
+        case .simulatedLidProtectionStarted: sourceDetail = "模拟合盖保护"
+        case .nightProtectionStarted: sourceDetail = "夜间息屏保护"
+        case .chromeAudioStarted: sourceDetail = "保护期间 Chrome 再次发声"
+        }
+
+        if let errorDescription {
+            record(
+                .mediaPauseRequestFailed,
+                "\(sourceDetail)：系统暂停请求失败：\(errorDescription)",
+                process: request.process,
+                chromeTab: request.chromeTab,
+                correlation: request.correlation
+            )
+        } else {
+            record(
+                .mediaPauseRequested,
+                "\(sourceDetail)：已发送系统暂停请求",
+                process: request.process,
+                chromeTab: request.chromeTab,
+                correlation: request.correlation
+            )
+        }
+    }
+
     private func armAndMute() {
         do {
             guard let device = try audio.builtInSpeaker() else {
