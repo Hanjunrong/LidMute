@@ -9,31 +9,36 @@ struct ContentView: View {
             AmberAtmosphere()
                 .ignoresSafeArea()
 
-            VStack(spacing: 16) {
+            VStack(spacing: 0) {
                 HeaderBar(model: model)
+
                 GuardHero(model: model)
 
-                HStack(alignment: .top, spacing: 16) {
-                    AutomationCard(model: model)
-                        .frame(maxWidth: .infinity)
+                HStack(alignment: .bottom, spacing: 0) {
+                    VStack(spacing: 0) {
+                        AutomationCard(model: model)
+                            .frame(maxWidth: .infinity)
+                        SimulationCard(model: model)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .frame(maxWidth: .infinity)
+
                     NowPlayingCard(model: model)
                         .frame(maxWidth: .infinity)
+                        .frame(height: 190)
                 }
-                .frame(height: 210)
-
-                SimulationCard(model: model)
 
                 ActivityTimeline(model: model)
-                    .frame(maxHeight: .infinity)
             }
-            .padding(22)
+            .padding(6)
         }
-        .frame(minWidth: 900, minHeight: 780)
+        .frame(minWidth: 900, minHeight: 680)
     }
 }
 
 private struct HeaderBar: View {
     @ObservedObject var model: AppViewModel
+    @State private var showChromeGuide = false
 
     var body: some View {
         HStack(spacing: 13) {
@@ -56,20 +61,39 @@ private struct HeaderBar: View {
 
             Spacer()
 
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(model.chromeBridgeStatus.contains("已接收") ? AmberVisualTheme.seaGlass : Color.secondary.opacity(0.45))
-                    .frame(width: 7, height: 7)
-                Text(model.chromeBridgeStatus)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            Button {
+                showChromeGuide.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(chromeDotColor)
+                        .frame(width: 7, height: 7)
+                    Text(model.chromeBridgeStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .background(.white.opacity(0.09), in: Capsule())
             }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .background(.white.opacity(0.09), in: Capsule())
+            .buttonStyle(.plain)
+            .popover(isPresented: $showChromeGuide) {
+                ChromeGuideView(model: model)
+            }
         }
         .padding(.horizontal, 4)
+    }
+
+    private var chromeDotColor: Color {
+        switch model.chromeConnectionState {
+        case .receivedEvent, .connected:
+            return AmberVisualTheme.seaGlass
+        case .waitingForExtension:
+            return AmberVisualTheme.amber.opacity(0.55)
+        case .notRegistered, .unknown:
+            return Color.secondary.opacity(0.45)
+        }
     }
 }
 
@@ -125,7 +149,7 @@ private struct GuardHero: View {
                 )
             )
         }
-        .amberGlassCard(padding: 22, cornerRadius: 28)
+        .amberGlassCard(padding: 10, cornerRadius: 14)
     }
 
     private var heroTitle: String {
@@ -179,6 +203,15 @@ private struct AutomationCard: View {
                     .accessibilityLabel("息屏夜间静音")
                     .accessibilityValue(model.nightScheduleEnabled ? "已开启" : "已关闭")
                     .disabled(!model.isEnabled)
+                    .padding(5)
+                    .background(
+                        Capsule()
+                            .fill(AmberVisualTheme.amber.opacity(0.12))
+                    )
+                    .overlay(
+                        Capsule()
+                            .stroke(AmberVisualTheme.amber.opacity(0.25), lineWidth: 0.8)
+                    )
             }
 
             HStack(spacing: 9) {
@@ -214,7 +247,7 @@ private struct AutomationCard: View {
 
         }
         .opacity(model.isEnabled ? 1 : 0.62)
-        .amberGlassCard()
+        .amberGlassCard(padding: 10, cornerRadius: 14)
     }
 }
 
@@ -276,7 +309,7 @@ private struct SimulationCard: View {
                 .accessibilityLabel("重置模拟状态")
             }
         }
-        .amberGlassCard(padding: 16, cornerRadius: 22)
+        .amberGlassCard(padding: 10, cornerRadius: 14)
     }
 }
 
@@ -284,7 +317,7 @@ private struct NowPlayingCard: View {
     @ObservedObject var model: AppViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
                 CardTitle(title: "当前声音", subtitle: "CoreAudio 实时", systemImage: "waveform")
                 Spacer()
@@ -293,69 +326,58 @@ private struct NowPlayingCard: View {
                     .frame(width: 8, height: 8)
             }
 
-            Group {
-                if model.currentAudioProcesses.isEmpty {
-                    HStack(spacing: 11) {
-                        Image(systemName: "speaker.slash")
-                            .font(.title3)
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("当前没有活动音频")
-                                .font(.subheadline.weight(.semibold))
-                            Text("检测到播放程序后会显示在这里")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.currentAudioProcesses.prefix(2), id: \.pid) { process in
+            if model.currentAudioProcesses.isEmpty {
+                Label("当前没有活动音频", systemImage: "speaker.slash")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(model.currentAudioProcesses, id: \.pid) { process in
                             AudioProcessRow(process: process)
-                        }
-                        if model.currentAudioProcesses.count > 2 {
-                            Text("另有 \(model.currentAudioProcesses.count - 2) 个活动进程")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
                     }
                 }
+                // The card's 190pt outer frame includes its 8pt glass-card padding.
+                // Keep the two-row viewport within the remaining content height.
+                .frame(height: 70)
+                .scrollIndicators(.visible)
             }
-            .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
 
-            Spacer(minLength: 0)
-
-            HStack(spacing: 11) {
+            HStack(spacing: 8) {
                 Spacer()
                 Button { model.sendMediaCommand(.previous) } label: {
                     Image(systemName: "backward.fill")
                 }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue))
+                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue, size: 32))
                 .help("上一首")
                 .accessibilityLabel("上一首")
 
                 Button { model.sendMediaCommand(.playPause) } label: {
                     Image(systemName: "playpause.fill")
                 }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.amber, isEmphasized: true, size: 48))
+                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.amber, isEmphasized: true, size: 36))
                 .help("暂停或开始")
                 .accessibilityLabel("暂停/开始")
 
                 Button { model.sendMediaCommand(.next) } label: {
                     Image(systemName: "forward.fill")
                 }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue))
+                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue, size: 32))
                 .help("下一首")
                 .accessibilityLabel("下一首")
                 Spacer()
             }
 
             Text(model.mediaStatus)
-                .font(.caption)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .lineLimit(1)
+
+            Spacer(minLength: 0)
         }
-        .amberGlassCard()
+        .amberGlassCard(padding: 8, cornerRadius: 14)
     }
 }
 
@@ -415,6 +437,9 @@ private struct CardTitle: View {
 private struct ActivityTimeline: View {
     @ObservedObject var model: AppViewModel
 
+    private let visibleRowCount = 3
+    private let rowHeight: CGFloat = 72
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -437,34 +462,38 @@ private struct ActivityTimeline: View {
                 )
             }
 
-            if model.events.isEmpty {
-                ContentUnavailableView(
-                    "暂无活动记录",
-                    systemImage: "checkmark.shield",
-                    description: Text("合盖、夜间保护和音频进程事件会显示在这里。")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(model.events) { event in
-                            EventTimelineRow(event: event)
-                            if event.id != model.events.last?.id {
-                                Divider().opacity(0.22)
-                                    .padding(.leading, 46)
+            Group {
+                if model.events.isEmpty {
+                    ContentUnavailableView(
+                        "暂无活动记录",
+                        systemImage: "checkmark.shield",
+                        description: Text("合盖、夜间保护和音频进程事件会显示在这里。")
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(model.events) { event in
+                                EventTimelineRow(event: event, rowHeight: rowHeight)
+                                if event.id != model.events.last?.id {
+                                    Divider().opacity(0.22)
+                                        .padding(.leading, 46)
+                                }
                             }
                         }
                     }
+                    .scrollIndicators(.visible)
                 }
-                .scrollIndicators(.visible)
             }
+            .frame(height: rowHeight * CGFloat(visibleRowCount))
         }
-        .amberGlassCard(padding: 17, cornerRadius: 26)
+        .amberGlassCard(padding: 10, cornerRadius: 14)
     }
 }
 
 private struct EventTimelineRow: View {
     let event: LidMuteEvent
+    let rowHeight: CGFloat
 
     var body: some View {
         let presentation = EventPresentation(kind: event.kind)
@@ -484,7 +513,7 @@ private struct EventTimelineRow: View {
                 Text(event.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(1)
                 if let tab = event.chromeTab {
                     Text("\(tab.title) · \(tab.url)")
                         .font(.caption2)
@@ -499,6 +528,7 @@ private struct EventTimelineRow: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 8)
+        .frame(height: rowHeight, alignment: .top)
     }
 
     private var accent: Color {
@@ -511,6 +541,148 @@ private struct EventTimelineRow: View {
             return AmberVisualTheme.mistBlue
         default:
             return AmberVisualTheme.amber
+        }
+    }
+}
+
+private struct ChromeGuideView: View {
+    @ObservedObject var model: AppViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            Label("Chrome 扩展连接指南", systemImage: "antenna.radiowaves.left.and.right")
+                .font(.headline.weight(.bold))
+                .foregroundStyle(AmberVisualTheme.amber)
+
+            Divider().opacity(0.3)
+
+            // Connection status
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusDotColor)
+                    .frame(width: 8, height: 8)
+                Text(model.chromeBridgeStatus)
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                if model.chromeConnectionState == .connected || model.chromeConnectionState == .receivedEvent {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(AmberVisualTheme.seaGlass)
+                }
+            }
+
+            // Registration area
+            if model.chromeConnectionState != .connected && model.chromeConnectionState != .receivedEvent {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("扩展 ID")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 8) {
+                        TextField("粘贴 chrome://extensions 中显示的 ID", text: $model.chromeExtensionId)
+                            .textFieldStyle(.plain)
+                            .font(.body.monospacedDigit())
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.15)))
+
+                        Button {
+                            model.registerChromeHost(extensionId: model.chromeExtensionId)
+                        } label: {
+                            Label("注册", systemImage: "key.fill")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .buttonStyle(
+                            LiquidGlassButtonStyle(tint: AmberVisualTheme.seaGlass, isEmphasized: false, shape: .capsule)
+                        )
+                        .fixedSize()
+                    }
+
+                    if !model.chromeRegistrationStatus.isEmpty {
+                        Label(model.chromeRegistrationStatus, systemImage: model.chromeRegistrationStatus.contains("失败") ? "exclamationmark.triangle" : "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(model.chromeRegistrationStatus.contains("失败") ? AmberVisualTheme.danger : .secondary)
+                    }
+                }
+                .padding(10)
+                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+
+                Divider().opacity(0.3)
+            }
+
+            // Step-by-step guide
+            VStack(alignment: .leading, spacing: 12) {
+                GuideStep(number: "1", title: "加载 Chrome 扩展", detail: [
+                    "打开 chrome://extensions",
+                    "开启右上角「开发者模式」",
+                    "点击「加载已解压的扩展程序」",
+                    "选择以下目录：",
+                ])
+                Text(model.chromeExtensionPath)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(AmberVisualTheme.seaGlass)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.leading, 28)
+
+                GuideStep(number: "2", title: "注册通信主机", detail: [
+                    "复制上一步出现的扩展 ID，粘贴到上方输入框",
+                    "点击「注册」按钮自动完成配置",
+                ])
+
+                GuideStep(number: "3", title: "验证连接", detail: [
+                    "刷新 Chrome 扩展页面（刷新按钮）",
+                    "回到 LidMute，状态变为「Chrome 已连接」",
+                ])
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    private var statusDotColor: Color {
+        switch model.chromeConnectionState {
+        case .receivedEvent, .connected:
+            return AmberVisualTheme.seaGlass
+        case .waitingForExtension:
+            return AmberVisualTheme.amber.opacity(0.55)
+        case .notRegistered, .unknown:
+            return Color.secondary.opacity(0.45)
+        }
+    }
+}
+
+private struct GuideStep: View {
+    let number: String
+    let title: String
+    let detail: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(AmberVisualTheme.amber.opacity(0.15))
+                    Text(number)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(AmberVisualTheme.amber)
+                }
+                .frame(width: 22, height: 22)
+
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(Array(detail.enumerated()), id: \.offset) { _, line in
+                    Text("• \(line)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.leading, 30)
         }
     }
 }

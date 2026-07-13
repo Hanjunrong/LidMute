@@ -16,8 +16,8 @@ test -x "$bin_path/LidMuteNativeHost"
 test -f ChromeExtension/manifest.json
 ! grep -q '"scripting"' ChromeExtension/manifest.json
 ! grep -q '"<all_urls>"' ChromeExtension/manifest.json
-LIDMUTE_BUILD_ROOT="$bin_path" zsh Scripts/make-app-bundle.sh
-LIDMUTE_BUILD_ROOT="$bin_path" zsh Scripts/make-app-bundle.sh
+LIDMUTE_SCRATCH_PATH="$scratch" zsh Scripts/make-app-bundle.sh
+LIDMUTE_SCRATCH_PATH="$scratch" zsh Scripts/make-app-bundle.sh
 test -f dist/LidMute.app/Contents/Resources/AppIcon.icns
 file dist/LidMute.app/Contents/Resources/AppIcon.icns | grep -q "Mac OS X icon"
 test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' dist/LidMute.app/Contents/Info.plist)" = "AppIcon"

@@ -36,6 +36,58 @@ struct AmberAtmosphere: View {
     }
 }
 
+struct AmberGlassBackdrop: View {
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            RoundedRectangle(cornerRadius: 34, style: .continuous)
+                .fill(.clear)
+                .glassEffect(.regular.tint(.white.opacity(0.15)), in: .rect(cornerRadius: 34))
+        } else {
+            RoundedRectangle(cornerRadius: 34, style: .continuous)
+                .fill(.white.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 34, style: .continuous)
+                        .stroke(.white.opacity(0.28), lineWidth: 1)
+                )
+        }
+    }
+}
+
+enum AmberGlassSurfaceShape {
+    case capsule
+    case roundedRectangle(cornerRadius: CGFloat)
+}
+
+struct AmberGlassSurfaceModifier: ViewModifier {
+    let tint: Color
+    let shape: AmberGlassSurfaceShape
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        switch shape {
+        case .capsule:
+            if #available(macOS 26.0, *) {
+                content.glassEffect(.regular.tint(tint.opacity(0.30)), in: .capsule)
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().stroke(tint.opacity(0.35), lineWidth: 0.8))
+            }
+        case let .roundedRectangle(cornerRadius):
+            if #available(macOS 26.0, *) {
+                content.glassEffect(.regular.tint(tint.opacity(0.28)), in: .rect(cornerRadius: cornerRadius))
+            } else {
+                content
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .stroke(tint.opacity(0.22), lineWidth: 0.8)
+                    )
+            }
+        }
+    }
+}
+
 private struct AmberGlassCardModifier: ViewModifier {
     let padding: CGFloat
     let cornerRadius: CGFloat
@@ -45,16 +97,23 @@ private struct AmberGlassCardModifier: ViewModifier {
         if #available(macOS 26.0, *) {
             content
                 .padding(padding)
-                .glassEffect(.regular.tint(.white.opacity(0.06)), in: .rect(cornerRadius: cornerRadius))
+                .background(
+                    Color.black.opacity(0.22),
+                    in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                )
+                .glassEffect(.regular.tint(.white.opacity(0.30)), in: .rect(cornerRadius: cornerRadius))
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(.white.opacity(0.45), lineWidth: 1.2)
+                )
         } else {
             content
                 .padding(padding)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(.white.opacity(0.42), lineWidth: 1)
+                        .stroke(.white.opacity(0.55), lineWidth: 1.2)
                 )
-                .shadow(color: .black.opacity(0.10), radius: 22, y: 10)
         }
     }
 }
@@ -62,5 +121,9 @@ private struct AmberGlassCardModifier: ViewModifier {
 extension View {
     func amberGlassCard(padding: CGFloat = 18, cornerRadius: CGFloat = 24) -> some View {
         modifier(AmberGlassCardModifier(padding: padding, cornerRadius: cornerRadius))
+    }
+
+    func amberGlassSurface(tint: Color = .white, shape: AmberGlassSurfaceShape = .capsule) -> some View {
+        modifier(AmberGlassSurfaceModifier(tint: tint, shape: shape))
     }
 }

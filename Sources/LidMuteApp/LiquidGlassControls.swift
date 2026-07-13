@@ -50,7 +50,7 @@ struct LiquidGlassButtonStyle: ButtonStyle {
 
     @available(macOS 26.0, *)
     private var glass: Glass {
-        .regular.tint(tint.opacity(isEmphasized ? 0.34 : 0.12))
+        .regular.tint(tint.opacity(isEmphasized ? 0.55 : 0.28))
     }
 
     private func label(_ configuration: Configuration) -> some View {
@@ -78,7 +78,7 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
         if #available(macOS 26.0, *) {
             configuration.label
                 .frame(width: size, height: size)
-                .glassEffect(.regular.tint(tint.opacity(isEmphasized ? 0.34 : 0.12)).interactive(), in: .circle)
+                .glassEffect(.regular.tint(tint.opacity(isEmphasized ? 0.55 : 0.28)).interactive(), in: .circle)
                 .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled))
         } else {
             configuration.label

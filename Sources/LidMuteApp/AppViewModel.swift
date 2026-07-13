@@ -7,6 +7,14 @@ enum SimulatedLidState {
     case opened
 }
 
+enum ChromeConnectionState: Equatable {
+    case unknown
+    case notRegistered
+    case waitingForExtension
+    case connected
+    case receivedEvent
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published var isEnabled = false
@@ -15,6 +23,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var chromeBridgeStatus = "等待 Chrome 扩展连接"
     @Published private(set) var simulatedLidState: SimulatedLidState = .opened
     @Published private(set) var currentAudioProcesses: [AudioProcess] = []
+    @Published private(set) var currentAudioSources: [AudioSourcePresentation] = []
     @Published var nightScheduleEnabled = false
     @Published var nightStartText = "00:00"
     @Published var nightEndText = "08:00"
@@ -22,9 +31,14 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var isNightProtectionActive = false
     @Published private(set) var nightScheduleStatus = "夜间静音未开启"
     @Published private(set) var mediaStatus = "系统媒体控制就绪"
+    @Published private(set) var chromeConnectionState: ChromeConnectionState = .unknown
+    @Published var chromeExtensionId = ""
+    @Published private(set) var chromeRegistrationStatus = ""
+    @Published private(set) var chromeExtensionPath = ""
 
     private let coordinator: ProtectionCoordinator
     private let store: JSONLineEventStore
+    private let applicationSupport: URL
     private let inboxURL: URL
     private let chromeDeduplicator: ChromeEventDeduplicator
     private var inboxOffset = 0
@@ -34,12 +48,14 @@ final class AppViewModel: ObservableObject {
     private var lidMonitor: SystemLidMonitor?
     private var displayMonitor: SystemDisplayMonitor?
     private var latestSystemLidClosed: Bool?
+    private var latestChromeEvidence: ChromeTabEvidence?
+    private var lastChromeEventAt: Date?
     private let mediaController = SystemMediaController()
     private let nightPreferences = NightProtectionPreferences()
     private var effectiveNightSchedule = NightSchedule(startMinutes: 0, endMinutes: 8 * 60)
 
     init() {
-        let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        self.applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "LidMute", directoryHint: .isDirectory)
         store = JSONLineEventStore(url: applicationSupport.appending(path: "events.jsonl"))
         inboxURL = applicationSupport.appending(path: "chrome-inbox.jsonl")
@@ -57,7 +73,9 @@ final class AppViewModel: ObservableObject {
         coordinator.onMediaPauseRequest = { [weak self] request in
             self?.handleMediaPauseRequest(request)
         }
+        resolveChromeExtensionPath()
         refresh()
+        checkChromeConnection()
     }
 
     func start() {
@@ -77,8 +95,7 @@ final class AppViewModel: ObservableObject {
                     guard let self else { return }
                     let controller = SystemAudioController()
                     let processes = (try? controller.activeOutputProcesses()) ?? []
-                    self.currentAudioProcesses = processes.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-                    self.coordinator.receiveAudioSnapshot(processes)
+                    self.updateAudioProcesses(processes)
                 }
             }
         }
@@ -170,23 +187,51 @@ final class AppViewModel: ObservableObject {
     }
 
     private func drainChromeInbox() {
-        guard let data = try? Data(contentsOf: inboxURL), data.count > inboxOffset else { return }
+        guard let data = try? Data(contentsOf: inboxURL), data.count > inboxOffset else {
+            checkChromeConnection()
+            return
+        }
         let unread = data[inboxOffset...]
         inboxOffset = data.count
+        var received = false
         for line in String(decoding: unread, as: UTF8.self).split(separator: "\n") {
             guard let decoded = try? ChromeBridgeFrame.decode(Data(line.utf8)),
                   (try? chromeDeduplicator.accept(decoded.eventID)) == true else { continue }
             chromeBridgeStatus = "已接收 Chrome 标签页事件"
+            latestChromeEvidence = decoded.evidence
             coordinator.receiveChromeEvidence(decoded.evidence)
+            received = true
         }
+        if received {
+            lastChromeEventAt = Date()
+        }
+        rebuildCurrentAudioSources()
+        checkChromeConnection()
         refresh()
     }
 
     private func pollAudioProcesses() {
         let controller = SystemAudioController()
         let processes = (try? controller.activeOutputProcesses()) ?? []
-        currentAudioProcesses = processes.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        updateAudioProcesses(processes)
+    }
+
+    private func updateAudioProcesses(_ processes: [AudioProcess]) {
+        currentAudioProcesses = processes.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+        if !processes.contains(where: AudioSourcePresentation.isChrome) {
+            latestChromeEvidence = nil
+        }
+        rebuildCurrentAudioSources()
         coordinator.receiveAudioSnapshot(processes)
+    }
+
+    private func rebuildCurrentAudioSources() {
+        currentAudioSources = AudioSourcePresentation.current(
+            processes: currentAudioProcesses,
+            chromeTab: latestChromeEvidence
+        )
     }
 
     private func refreshNightProtection() {
@@ -220,6 +265,147 @@ final class AppViewModel: ObservableObject {
             mediaStatus = "系统暂停请求失败：\(error.localizedDescription)"
             coordinator.recordMediaPauseResult(request, errorDescription: error.localizedDescription)
         }
+    }
+
+    private func resolveChromeExtensionPath() {
+        // Production: inside app bundle
+        let bundlePath = Bundle.main.bundleURL
+            .appending(path: "Contents/Resources/ChromeExtension").path
+        if FileManager.default.fileExists(atPath: bundlePath) {
+            chromeExtensionPath = bundlePath
+            return
+        }
+        // Development: relative to executable
+        let devPath = URL(fileURLWithPath: CommandLine.arguments[0])
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "ChromeExtension").path
+        if FileManager.default.fileExists(atPath: devPath) {
+            chromeExtensionPath = devPath
+            return
+        }
+        chromeExtensionPath = "LidMute.app/Contents/Resources/ChromeExtension"
+    }
+
+    private var chromeManifestURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.lidmute.nativehost.json")
+    }
+
+    private var chromePidURL: URL {
+        applicationSupport.appending(path: "chrome-host.pid")
+    }
+
+    private var chromeOriginURL: URL {
+        applicationSupport.appending(path: "chrome-origin.txt")
+    }
+
+    private var registeredExtensionId: String? {
+        guard let data = try? Data(contentsOf: chromeOriginURL),
+              let content = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              content.hasPrefix("chrome-extension://"),
+              content.hasSuffix("/") else { return nil }
+        return String(content.dropFirst("chrome-extension://".count).dropLast())
+    }
+
+    func checkChromeConnection() {
+        let fm = FileManager.default
+        let manifestExists = fm.fileExists(atPath: chromeManifestURL.path)
+
+        if !manifestExists {
+            chromeConnectionState = .notRegistered
+            chromeBridgeStatus = "未注册 Chrome 通信主机"
+            return
+        }
+
+        let isHostAlive: Bool = {
+            guard let pidData = try? Data(contentsOf: chromePidURL),
+                  let pidStr = String(data: pidData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  let pid = Int32(pidStr) else { return false }
+            return kill(pid, 0) == 0
+        }()
+
+        if isHostAlive {
+            let recentlyReceived = lastChromeEventAt.map { Date().timeIntervalSince($0) < 30 } ?? false
+            if recentlyReceived {
+                chromeConnectionState = .receivedEvent
+                chromeBridgeStatus = "最近收到 Chrome 事件"
+            } else {
+                chromeConnectionState = .connected
+                chromeBridgeStatus = "Chrome 已连接"
+            }
+        } else {
+            chromeConnectionState = .waitingForExtension
+            chromeBridgeStatus = "等待 Chrome 扩展连接"
+        }
+
+        // Pre-fill extension ID if registered
+        if chromeExtensionId.isEmpty, let registeredId = registeredExtensionId {
+            chromeExtensionId = registeredId
+        }
+    }
+
+    func registerChromeHost(extensionId: String) {
+        let extId = extensionId.trimmingCharacters(in: .whitespaces)
+        guard !extId.isEmpty else {
+            chromeRegistrationStatus = "请输入扩展 ID"
+            return
+        }
+
+        let origin = "chrome-extension://\(extId)/"
+
+        do {
+            try FileManager.default.createDirectory(at: applicationSupport, withIntermediateDirectories: true)
+
+            // Write origin file
+            try origin.write(to: chromeOriginURL, atomically: true, encoding: .utf8)
+
+            // Find native host path
+            let hostPath = findNativeHostPath()
+            guard FileManager.default.isExecutableFile(atPath: hostPath) else {
+                chromeRegistrationStatus = "找不到 LidMuteNativeHost，请先编译项目"
+                return
+            }
+
+            // Write NativeMessagingHost manifest
+            let manifestDir = chromeManifestURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: manifestDir, withIntermediateDirectories: true)
+
+            let manifest: [String: Any] = [
+                "name": "com.lidmute.nativehost",
+                "description": "LidMute Chrome bridge",
+                "path": hostPath,
+                "type": "stdio",
+                "allowed_origins": [origin],
+            ]
+            let data = try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .withoutEscapingSlashes])
+            try data.write(to: chromeManifestURL, options: .atomic)
+
+            // Set permissions to 600 (owner read/write only)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: chromeManifestURL.path)
+
+            chromeRegistrationStatus = "注册成功！请在 Chrome 扩展页面刷新后回到本应用"
+            checkChromeConnection()
+        } catch {
+            chromeRegistrationStatus = "注册失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func findNativeHostPath() -> String {
+        // Same directory as the running executable
+        let appDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        let hostPath = appDir.appending(path: "LidMuteNativeHost").path
+        if FileManager.default.isExecutableFile(atPath: hostPath) {
+            return hostPath
+        }
+        // Fallback: inside app bundle
+        let bundleHost = Bundle.main.bundleURL
+            .appending(path: "Contents/MacOS/LidMuteNativeHost").path
+        if FileManager.default.isExecutableFile(atPath: bundleHost) {
+            return bundleHost
+        }
+        return hostPath
     }
 
     private func refresh() {

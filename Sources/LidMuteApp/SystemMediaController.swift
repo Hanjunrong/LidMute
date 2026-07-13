@@ -13,17 +13,16 @@ enum SystemMediaError: LocalizedError {
 
 final class SystemMediaController {
     func send(_ command: MediaCommand) throws {
-        for keyState in [0xA, 0xB] {
-            let data1 = (command.rawValue << 16) | (keyState << 8)
+        for descriptor in MediaKeyEventDescriptor.events(for: command) {
             guard let event = NSEvent.otherEvent(
                 with: .systemDefined,
                 location: .zero,
-                modifierFlags: NSEvent.ModifierFlags(rawValue: 0xA00),
-                timestamp: 0,
+                modifierFlags: NSEvent.ModifierFlags(rawValue: descriptor.modifierFlags),
+                timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: 0,
                 context: nil,
                 subtype: 8,
-                data1: data1,
+                data1: descriptor.data1,
                 data2: -1
             )?.cgEvent else {
                 throw SystemMediaError.eventCreationFailed

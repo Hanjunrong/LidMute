@@ -14,6 +14,10 @@ guard !actualOrigin.isEmpty, actualOrigin == expectedOrigin else {
     exit(2)
 }
 
+// Write PID for Chrome connection health detection
+let pidURL = appDirectory.appending(path: "chrome-host.pid")
+try? Data("\(ProcessInfo.processInfo.processIdentifier)".utf8).write(to: pidURL)
+
 var buffer = Data()
 while true {
     let chunk = FileHandle.standardInput.availableData

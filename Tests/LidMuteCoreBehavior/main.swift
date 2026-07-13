@@ -18,11 +18,14 @@ struct LidMuteCoreBehaviorTests {
             try nightScheduleHandlesBeijingTimeAcrossMidnight()
             try nightProtectionPreferencesPreserveLastValidSchedule()
             try mediaCommandsUseSystemKeyTypes()
+            try audioSourcePresentationPrefersReadableNames()
+            try currentAudioSourcesRequireAnActiveChromeProcess()
             try eventPresentationUsesReadableChineseLabels()
             try mediaPauseRequestRetainsEvidenceAndReadablePresentation()
             try protectedSourcesRequestPauseOnlyWithChromeEvidence()
             try protectionExitNeverRequestsMediaPlayback()
             try chromePauseRequestsUseGlobalDebounce()
+            try timelineRecordsOnlyWhileGuardIsEnabled()
             try mediaPauseResultsUseHonestEventWording()
             try repeatedAudioSnapshotsDoNotDuplicateLogEvents()
             try audioProcessCanBeLoggedAgainAfterStopping()
@@ -31,7 +34,7 @@ struct LidMuteCoreBehaviorTests {
             try chromeEventDeduplicatorPersistsAcceptedIDs()
             print("PASS Chrome tab evidence round-trips URL and identifiers")
             print("PASS JSONL store reloads valid records and skips malformed input")
-            print("PASS lid-open restores volume while keeping speaker muted")
+            print("PASS lid-open restores original speaker mute state and volume")
             print("PASS manual disable fully restores captured speaker state")
             print("PASS manual disable after lid-open fully restores captured speaker state")
             print("PASS volume fallback keeps output silent on lid-open")
@@ -42,11 +45,14 @@ struct LidMuteCoreBehaviorTests {
             print("PASS night schedule handles Beijing time across midnight")
             print("PASS night protection preferences preserve the last valid schedule")
             print("PASS media commands use system key types")
+            print("PASS audio source presentation prefers tab and app names over PID")
+            print("PASS current Chrome tab requires an active Chrome audio process")
             print("PASS event presentation uses readable Chinese labels")
             print("PASS media pause requests retain evidence and readable presentation")
             print("PASS protected sources request pause only with Chrome evidence")
             print("PASS protection exit never requests media playback")
             print("PASS Chrome pause requests use global debounce")
+            print("PASS timeline records Chrome events only while guard is enabled")
             print("PASS media pause results use honest event wording")
             print("PASS repeated audio snapshots do not duplicate log events")
             print("PASS stopped audio process can be logged after becoming active again")
@@ -113,8 +119,8 @@ struct LidMuteCoreBehaviorTests {
         }
 
         coordinator.receiveLidState(closed: false)
-        guard audio.lastMute == true, audio.lastVolume == 0.72 else {
-            throw BehaviorTestError.expectationFailed("lid-open did not restore volume while keeping speaker muted")
+        guard audio.lastMute == false, audio.lastVolume == 0.72 else {
+            throw BehaviorTestError.expectationFailed("lid-open did not restore original mute state and volume")
         }
     }
 
@@ -157,7 +163,7 @@ struct LidMuteCoreBehaviorTests {
         coordinator.receiveLidState(closed: true)
         coordinator.receiveLidState(closed: false)
 
-        guard audio.lastMute == true, audio.lastVolume == 0 else {
+        guard audio.lastMute == false, audio.lastVolume == 0 else {
             throw BehaviorTestError.expectationFailed("volume fallback restored an audible output level on lid-open")
         }
     }
@@ -264,10 +270,85 @@ struct LidMuteCoreBehaviorTests {
     }
 
     private static func mediaCommandsUseSystemKeyTypes() throws {
-        guard MediaCommand.previous.rawValue == 20,
-              MediaCommand.next.rawValue == 19,
+        guard MediaCommand.previous.rawValue == 18,
+              MediaCommand.next.rawValue == 17,
               MediaCommand.playPause.rawValue == 16 else {
             throw BehaviorTestError.expectationFailed("media command key types are not mapped to macOS system keys")
+        }
+
+        let events = MediaKeyEventDescriptor.events(for: .playPause)
+        guard events == [
+            MediaKeyEventDescriptor(modifierFlags: 0xA00, data1: 0x100A00),
+            MediaKeyEventDescriptor(modifierFlags: 0xB00, data1: 0x100B00),
+        ] else {
+            throw BehaviorTestError.expectationFailed("media command does not emit a matching system key down/up pair")
+        }
+    }
+
+    private static func audioSourcePresentationPrefersReadableNames() throws {
+        let chrome = activeProcess(pid: 1357)
+        let tab = ChromeTabEvidence(
+            sessionID: "session",
+            windowID: 3,
+            tabID: 9,
+            index: 1,
+            title: "优酷",
+            url: "https://v.youku.com",
+            audible: true,
+            muted: false,
+            isActive: false,
+            isPinned: false,
+            isIncognito: false
+        )
+        let chromeSource = AudioSourcePresentation(process: chrome, chromeTab: tab)
+        let music = AudioProcess(
+            pid: 2468,
+            name: "网易云音乐",
+            bundleID: "com.netease.163music",
+            executablePath: nil,
+            launchDate: nil,
+            isOutputActive: true
+        )
+        let musicSource = AudioSourcePresentation(process: music, chromeTab: nil)
+        let unknown = AudioProcess(
+            pid: 9753,
+            name: "PID 9753",
+            bundleID: nil,
+            executablePath: nil,
+            launchDate: nil,
+            isOutputActive: true
+        )
+        let unknownSource = AudioSourcePresentation(process: unknown, chromeTab: nil)
+
+        guard chromeSource.title == "优酷",
+              chromeSource.subtitle == "Google Chrome · https://v.youku.com",
+              musicSource.title == "网易云音乐",
+              musicSource.subtitle == "com.netease.163music",
+              unknownSource.title == "PID 9753",
+              unknownSource.subtitle.isEmpty else {
+            throw BehaviorTestError.expectationFailed("audio source presentation exposed PID instead of readable source names")
+        }
+    }
+
+    private static func currentAudioSourcesRequireAnActiveChromeProcess() throws {
+        let chrome = activeProcess(pid: 1357)
+        let tab = ChromeTabEvidence(
+            sessionID: "session",
+            windowID: 3,
+            tabID: 9,
+            index: 1,
+            title: "优酷",
+            url: "https://v.youku.com",
+            audible: true,
+            muted: false,
+            isActive: false,
+            isPinned: false,
+            isIncognito: false
+        )
+
+        guard AudioSourcePresentation.current(processes: [chrome], chromeTab: tab).first?.title == "优酷",
+              AudioSourcePresentation.current(processes: [], chromeTab: tab).isEmpty else {
+            throw BehaviorTestError.expectationFailed("historical Chrome tab remained visible without active Chrome output")
         }
     }
 
@@ -421,6 +502,45 @@ struct LidMuteCoreBehaviorTests {
               store.events[1].kind == .mediaPauseRequestFailed,
               store.events[1].detail.contains("event failed") else {
             throw BehaviorTestError.expectationFailed("media pause result log overclaimed or lost failure details")
+        }
+    }
+
+    @MainActor
+    private static func timelineRecordsOnlyWhileGuardIsEnabled() throws {
+        let store = MemoryEventStore()
+        let coordinator = ProtectionCoordinator(audio: FakeAudioController(), store: store)
+        let evidence = ChromeTabEvidence(
+            sessionID: "s",
+            windowID: 1,
+            tabID: 2,
+            index: 0,
+            title: "优酷",
+            url: "https://v.youku.com",
+            audible: true,
+            muted: false,
+            isActive: true,
+            isPinned: false,
+            isIncognito: false
+        )
+
+        coordinator.receiveChromeEvidence(evidence)
+        guard store.events.isEmpty else {
+            throw BehaviorTestError.expectationFailed("disabled guard still recorded Chrome timeline events")
+        }
+
+        coordinator.setEnabled(true)
+        coordinator.receiveChromeEvidence(evidence)
+        guard store.events.count == 2,
+              store.events[0].kind == .protectionEnabled,
+              store.events[1].kind == .chromeTabAudible else {
+            throw BehaviorTestError.expectationFailed("enabled guard did not record expected timeline events")
+        }
+
+        coordinator.setEnabled(false)
+        let countAfterDisable = store.events.count
+        coordinator.receiveChromeEvidence(evidence)
+        guard store.events.count == countAfterDisable else {
+            throw BehaviorTestError.expectationFailed("guard recorded Chrome timeline events after being disabled")
         }
     }
 

@@ -125,13 +125,14 @@ public final class ProtectionCoordinator {
     }
 
     public func receiveChromeEvidence(_ evidence: ChromeTabEvidence) {
+        guard isEnabled else { return }
         let chromeProcess = try? audio.activeOutputProcesses().first {
             $0.isOutputActive && ($0.bundleID?.localizedCaseInsensitiveContains("chrome") == true || $0.name.localizedCaseInsensitiveContains("chrome"))
         }
         let correlation: CorrelationStatus = chromeProcess == nil ? .browserObservedOnly : .systemMatched
         record(.chromeTabAudible, "Chrome 标签页开始发声：\(evidence.title)", process: chromeProcess, chromeTab: evidence, correlation: correlation)
 
-        if isEnabled, state == .protecting, let targetDevice {
+        if state == .protecting, let targetDevice {
             do {
                 try audio.enforceSilence(on: targetDevice)
                 record(.muteEnforced, "Chrome 标签页发声，已强制静音内建扬声器", chromeTab: evidence, correlation: correlation)
@@ -140,7 +141,7 @@ public final class ProtectionCoordinator {
             }
         }
 
-        if isEnabled, state == .protecting, evidence.audible {
+        if state == .protecting, evidence.audible {
             emitMediaPauseRequest(
                 trigger: .chromeAudioStarted,
                 source: nil,
@@ -232,7 +233,7 @@ public final class ProtectionCoordinator {
         do {
             let safeVolume = savedState.usedVolumeFallback ? 0 : savedState.volume
             let openState = AudioDeviceState(
-                muted: true,
+                muted: savedState.muted,
                 volume: safeVolume,
                 usedVolumeFallback: savedState.usedVolumeFallback
             )

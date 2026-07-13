@@ -13,9 +13,29 @@ public enum ProtectionSource: String, Codable, Hashable, Sendable {
 }
 
 public enum MediaCommand: Int, Codable, CaseIterable, Sendable {
-    case previous = 20
-    case next = 19
+    case previous = 18
+    case next = 17
     case playPause = 16
+}
+
+public struct MediaKeyEventDescriptor: Equatable, Sendable {
+    public let modifierFlags: UInt
+    public let data1: Int
+
+    public init(modifierFlags: UInt, data1: Int) {
+        self.modifierFlags = modifierFlags
+        self.data1 = data1
+    }
+
+    public static func events(for command: MediaCommand) -> [Self] {
+        [0xA, 0xB].map { keyState in
+            let flags = keyState << 8
+            return Self(
+                modifierFlags: UInt(flags),
+                data1: (command.rawValue << 16) | flags
+            )
+        }
+    }
 }
 
 public enum MediaPauseTrigger: String, Codable, Sendable {

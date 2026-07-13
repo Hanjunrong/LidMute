@@ -4,18 +4,38 @@ set -euo pipefail
 root="${0:A:h:h}"
 temp_root="${TMPDIR:-/tmp}"
 temp_root="${temp_root%/}"
-scratch="${LIDMUTE_SCRATCH_PATH:-$temp_root/lidmute-build}"
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$temp_root/lidmute-clang-cache}"
 export SWIFTPM_CACHE_PATH="${SWIFTPM_CACHE_PATH:-$temp_root/lidmute-swiftpm-cache}"
-build_root="${LIDMUTE_BUILD_ROOT:-$(swift build --package-path "$root" --disable-sandbox --scratch-path "$scratch" --show-bin-path)}"
+scratch="${LIDMUTE_SCRATCH_PATH:-$temp_root/lidmute-build}"
 app="${LIDMUTE_APP_PATH:-$root/dist/LidMute.app}"
+
+build_args=(
+  --package-path "$root"
+  --disable-sandbox
+  --scratch-path "$scratch"
+)
+if [[ -n "${LIDMUTE_BUILD_TRIPLE:-}" ]]; then
+  build_args+=(--triple "$LIDMUTE_BUILD_TRIPLE")
+fi
+
+# Packaging is only allowed from a build completed by this invocation.
+# No environment variable may bypass this build or point at another bin path.
+swift build "${build_args[@]}"
+build_root="$(swift build "${build_args[@]}" --show-bin-path)"
+
 binary="$build_root/LidMuteApp"
 host="$build_root/LidMuteNativeHost"
 icon_source="$root/Assets/AppIcon-1024.png"
 
 [[ -x "$binary" && -x "$host" ]] || {
-  print "Build first: zsh Scripts/run-smoke-check.sh" >&2
+  print "Build did not produce both LidMuteApp and LidMuteNativeHost in $build_root" >&2
   exit 66
+}
+
+stale_source="$(find "$root/Sources" -type f -newer "$binary" -print -quit)"
+[[ -z "$stale_source" ]] || {
+  print "Refusing to package stale binary: $binary is older than $stale_source" >&2
+  exit 67
 }
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -23,6 +43,7 @@ cp "$binary" "$app/Contents/MacOS/LidMute"
 cp "$host" "$app/Contents/MacOS/LidMuteNativeHost"
 mkdir -p "$app/Contents/Resources/ChromeExtension"
 ditto "$root/ChromeExtension" "$app/Contents/Resources/ChromeExtension"
+cp "$root/Scripts/register-chrome-host.sh" "$app/Contents/Resources/register-chrome-host.sh"
 
 iconset="$scratch/LidMute.iconset"
 mkdir -p "$iconset"

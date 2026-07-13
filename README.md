@@ -1,5 +1,7 @@
 # LidMute
 
+界面修改必须遵守 [中文设计说明中的强制视觉设计原则](docs/LidMute-中文设计说明.md#三视觉设计原则强制)。
+
 LidMute prevents sound from the current default built-in output while the Mac lid
 is closed. It remains available from the menu bar and keeps a permanent local
 event timeline. The bundled Chrome extension adds tab-level evidence for Chrome
@@ -32,6 +34,11 @@ To make a local `.app` bundle after a successful build:
 zsh Scripts/make-app-bundle.sh
 open dist/LidMute.app
 ```
+
+`make-app-bundle.sh` always rebuilds the package immediately before copying
+binaries into the app bundle and refuses to package a binary older than the
+current `Sources` tree. The build step cannot be bypassed with an environment
+variable or redirected to a previously generated binary directory.
 
 The generated bundle is unsigned and intended for local use. Code signing and
 notarization require a full Xcode installation and a Developer ID certificate.
