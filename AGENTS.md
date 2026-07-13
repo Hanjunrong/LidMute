@@ -19,20 +19,26 @@ This script:
 
 - **Zero card spacing**: `VisualLayoutMetrics.cardSpacing = 0` — card frames are exactly adjacent
 - **Per-card rounded corners**: Each card has its own `amberGlassCard(padding: 0, cornerRadius: 14)` — all 4 corners rounded, individual glass background + stroke overlay
-- **Content fills frame**: Every card's content view must have `.frame(maxHeight: .infinity)` BEFORE `.padding()`. Without this, intrinsic content height < padded height → amberGlassCard is centered within the frame, creating visible gaps between cards.
-- **Only the timeline card consumes extra window height** — all other cards have fixed heights from `VisualLayoutMetrics`.
+## Card layout principle
 
-### Key layout patterns
+**Content must fill frame before padding + background are applied.**
+
+Cards follow this modifier order:
 
 ```
-// Every card must follow this modifier order:
-ContentHStack/VStack(...)
-    .frame(maxHeight: .infinity)    // ← REQUIRED: fills padded area
-    .padding(10)                     // internal padding (8 for NowPlayingCard)
-    .amberGlassCard(padding: 0, cornerRadius: 14)  // card background + stroke
+ContentStack(...)
+    .frame(maxHeight: .infinity)    // ① 撑满：扩展到外层 frame 提供的空间
+    .padding(10)                     // ② 再加内边距
+    .amberGlassCard(...)             // ③ 背景/描边覆盖整个 frame
 ```
 
-Without `.frame(maxHeight: .infinity)`, the content's intrinsic height is smaller than the frame height (e.g. GuardHero content ≈ 106pt + padding = 126pt vs frame 148pt). SwiftUI centers the undersized content within the frame, leaving transparent gaps at top/bottom.
+Why: intrinsic content height < `.frame(height: X)` → SwiftUI 居中内容 → background 只覆盖内容区域，不撑到 frame 边界 → 卡片间出现透明间隙。
+
+Example: GuardHero content ≈ 106pt → `.padding(10)` = 126pt → `.frame(height: 148)` → 内容居中 → 上下各 11pt 空隙。
+
+Fix: `.frame(maxHeight: .infinity)` 让内容先扩展到 frame 可用空间，padding 和 background 随后覆盖整个区域。
+
+This applies to all cards (GuardHero, AutomationCard, SimulationCard, NowPlayingCard) except ActivityTimeline, which has dynamic height and no fixed `.frame(height:)`.
 
 ### Notch at HStack inner column boundary
 
