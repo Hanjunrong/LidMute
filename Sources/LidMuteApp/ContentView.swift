@@ -168,7 +168,8 @@ private struct GuardHero: View {
                 )
             )
         }
-        .amberGlassCard(padding: 10, cornerRadius: 14)
+        .padding(10)
+        .amberGlassCard(padding: 0, cornerRadius: 14)
     }
 
     private var heroTitle: String {
@@ -266,7 +267,8 @@ private struct AutomationCard: View {
 
         }
         .opacity(model.isEnabled ? 1 : 0.62)
-        .amberGlassCard(padding: 10, cornerRadius: 14)
+        .padding(10)
+        .amberGlassCard(padding: 0, cornerRadius: 14)
     }
 }
 
@@ -328,7 +330,8 @@ private struct SimulationCard: View {
                 .accessibilityLabel("重置模拟状态")
             }
         }
-        .amberGlassCard(padding: 10, cornerRadius: 14)
+        .padding(10)
+        .amberGlassCard(padding: 0, cornerRadius: 14)
     }
 }
 
@@ -396,7 +399,8 @@ private struct NowPlayingCard: View {
 
             Spacer(minLength: 0)
         }
-        .amberGlassCard(padding: 8, cornerRadius: 14)
+        .padding(8)
+        .amberGlassCard(padding: 0, cornerRadius: 14)
     }
 }
 
@@ -506,7 +510,8 @@ private struct ActivityTimeline: View {
             }
             .frame(height: max(CGFloat(VisualLayoutMetrics.timelineDefaultViewportHeight), viewportHeight))
         }
-        .amberGlassCard(padding: 10, cornerRadius: 14)
+        .padding(10)
+        .amberGlassCard(padding: 0, cornerRadius: 14)
     }
 }
 
