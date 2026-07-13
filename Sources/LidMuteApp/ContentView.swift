@@ -3,34 +3,57 @@ import LidMuteCore
 
 struct ContentView: View {
     @ObservedObject var model: AppViewModel
+    private let cardSpacing = CGFloat(VisualLayoutMetrics.cardSpacing)
+    private let appPadding = CGFloat(VisualLayoutMetrics.appPadding)
 
     var body: some View {
         ZStack {
             AmberAtmosphere()
                 .ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                HeaderBar(model: model)
+            GeometryReader { proxy in
+                let availableContentHeight = max(0, Double(proxy.size.height - appPadding * 2))
+                let timelineViewportHeight = CGFloat(
+                    VisualLayoutMetrics.timelineViewportHeight(
+                        forAvailableContentHeight: availableContentHeight
+                    )
+                )
 
-                GuardHero(model: model)
+                VStack(spacing: cardSpacing) {
+                    HeaderBar(model: model)
+                        .frame(height: CGFloat(VisualLayoutMetrics.headerHeight))
 
-                HStack(alignment: .bottom, spacing: 0) {
-                    VStack(spacing: 0) {
-                        AutomationCard(model: model)
-                            .frame(maxWidth: .infinity)
-                        SimulationCard(model: model)
-                            .frame(maxWidth: .infinity)
+                    TightCardDeck {
+                        VStack(spacing: cardSpacing) {
+                            GuardHero(model: model)
+                                .frame(height: CGFloat(VisualLayoutMetrics.guardCardHeight))
+
+                            HStack(alignment: .top, spacing: cardSpacing) {
+                                VStack(spacing: cardSpacing) {
+                                    AutomationCard(model: model)
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: CGFloat(VisualLayoutMetrics.automationCardHeight))
+                                    SimulationCard(model: model)
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: CGFloat(VisualLayoutMetrics.simulationCardHeight))
+                                }
+                                .frame(maxWidth: .infinity)
+                                .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
+
+                                NowPlayingCard(model: model)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
+                            }
+                            .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
+
+                            ActivityTimeline(model: model, viewportHeight: timelineViewportHeight)
+                        }
                     }
-                    .frame(maxWidth: .infinity)
-
-                    NowPlayingCard(model: model)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 190)
+                    .frame(maxHeight: .infinity, alignment: .top)
                 }
-
-                ActivityTimeline(model: model)
+                .padding(appPadding)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             }
-            .padding(6)
         }
         .frame(minWidth: 900, minHeight: 680)
     }
@@ -436,9 +459,9 @@ private struct CardTitle: View {
 
 private struct ActivityTimeline: View {
     @ObservedObject var model: AppViewModel
+    let viewportHeight: CGFloat
 
-    private let visibleRowCount = 3
-    private let rowHeight: CGFloat = 72
+    private let rowHeight = CGFloat(VisualLayoutMetrics.timelineRowHeight)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -473,19 +496,19 @@ private struct ActivityTimeline: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(model.events) { event in
-                                EventTimelineRow(event: event, rowHeight: rowHeight)
-                                if event.id != model.events.last?.id {
-                                    Divider().opacity(0.22)
-                                        .padding(.leading, 46)
-                                }
+                            ForEach(Array(model.events.enumerated()), id: \.element.id) { index, event in
+                                EventTimelineRow(
+                                    event: event,
+                                    rowHeight: rowHeight,
+                                    showsDivider: index < model.events.count - 1
+                                )
                             }
                         }
                     }
                     .scrollIndicators(.visible)
                 }
             }
-            .frame(height: rowHeight * CGFloat(visibleRowCount))
+            .frame(height: max(CGFloat(VisualLayoutMetrics.timelineDefaultViewportHeight), viewportHeight))
         }
         .amberGlassCard(padding: 10, cornerRadius: 14)
     }
@@ -494,6 +517,7 @@ private struct ActivityTimeline: View {
 private struct EventTimelineRow: View {
     let event: LidMuteEvent
     let rowHeight: CGFloat
+    let showsDivider: Bool
 
     var body: some View {
         let presentation = EventPresentation(kind: event.kind)
@@ -529,6 +553,14 @@ private struct EventTimelineRow: View {
         }
         .padding(.vertical, 8)
         .frame(height: rowHeight, alignment: .top)
+        .overlay(alignment: .bottom) {
+            if showsDivider {
+                Rectangle()
+                    .fill(.white.opacity(0.22))
+                    .frame(height: 1)
+                    .padding(.leading, 46)
+            }
+        }
     }
 
     private var accent: Color {

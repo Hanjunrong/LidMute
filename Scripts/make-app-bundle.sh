@@ -20,6 +20,7 @@ fi
 
 # Packaging is only allowed from a build completed by this invocation.
 # No environment variable may bypass this build or point at another bin path.
+"$root/Scripts/check-visual-principles.sh"
 swift build "${build_args[@]}"
 build_root="$(swift build "${build_args[@]}" --show-bin-path)"
 

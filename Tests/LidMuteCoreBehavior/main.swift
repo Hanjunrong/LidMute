@@ -30,6 +30,9 @@ struct LidMuteCoreBehaviorTests {
             try repeatedAudioSnapshotsDoNotDuplicateLogEvents()
             try audioProcessCanBeLoggedAgainAfterStopping()
             try silenceErrorIsLoggedAgainAfterAudioRestarts()
+            try visualLayoutKeepsCardsFlush()
+            try visualLayoutShowsExactlyThreeTimelineRowsByDefault()
+            try visualLayoutAssignsExtraHeightOnlyToTimeline()
             try chromeFrameCapturesAudibleTabDetails()
             try chromeEventDeduplicatorPersistsAcceptedIDs()
             print("PASS Chrome tab evidence round-trips URL and identifiers")
@@ -57,6 +60,9 @@ struct LidMuteCoreBehaviorTests {
             print("PASS repeated audio snapshots do not duplicate log events")
             print("PASS stopped audio process can be logged after becoming active again")
             print("PASS silence error is logged again after audio restarts")
+            print("PASS visual layout keeps card edges flush")
+            print("PASS visual layout shows exactly three timeline rows by default")
+            print("PASS visual layout assigns extra height only to timeline")
             print("PASS Chrome audible frame retains tab-level details")
             print("PASS Chrome event deduplicator persists accepted IDs")
         } catch {
@@ -617,6 +623,34 @@ struct LidMuteCoreBehaviorTests {
             launchDate: nil,
             isOutputActive: true
         )
+    }
+
+    private static func visualLayoutKeepsCardsFlush() throws {
+        guard VisualLayoutMetrics.cardSpacing == 0,
+              VisualLayoutMetrics.automationCardHeight + VisualLayoutMetrics.simulationCardHeight == VisualLayoutMetrics.middleDeckHeight else {
+            throw BehaviorTestError.expectationFailed("card spacing is not flush")
+        }
+    }
+
+    private static func visualLayoutShowsExactlyThreeTimelineRowsByDefault() throws {
+        let expected = VisualLayoutMetrics.timelineRowHeight * Double(VisualLayoutMetrics.timelineVisibleRowCount)
+        guard VisualLayoutMetrics.timelineDefaultViewportHeight == expected else {
+            throw BehaviorTestError.expectationFailed("timeline default viewport is not exactly three rows")
+        }
+    }
+
+    private static func visualLayoutAssignsExtraHeightOnlyToTimeline() throws {
+        let defaultContentHeight = VisualLayoutMetrics.defaultWindowHeight - VisualLayoutMetrics.appPadding * 2
+        let stretchedContentHeight = defaultContentHeight + 160
+        let defaultViewport = VisualLayoutMetrics.timelineViewportHeight(forAvailableContentHeight: defaultContentHeight)
+        let stretchedViewport = VisualLayoutMetrics.timelineViewportHeight(forAvailableContentHeight: stretchedContentHeight)
+
+        guard defaultViewport == VisualLayoutMetrics.timelineDefaultViewportHeight else {
+            throw BehaviorTestError.expectationFailed("default timeline viewport is not clamped to three rows")
+        }
+        guard stretchedViewport == defaultViewport + 160 else {
+            throw BehaviorTestError.expectationFailed("extra window height was not assigned only to the timeline")
+        }
     }
 
     private static func chromeFrameCapturesAudibleTabDetails() throws {

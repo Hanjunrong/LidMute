@@ -53,6 +53,30 @@ struct AmberGlassBackdrop: View {
     }
 }
 
+struct TightCardDeck<Content: View>: View {
+    let cornerRadius: CGFloat
+    @ViewBuilder var content: Content
+
+    init(cornerRadius: CGFloat = 14, @ViewBuilder content: () -> Content) {
+        self.cornerRadius = cornerRadius
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .background {
+                if #available(macOS 26.0, *) {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color.black.opacity(0.22))
+                        .glassEffect(.regular.tint(.white.opacity(0.30)), in: .rect(cornerRadius: cornerRadius))
+                } else {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                }
+            }
+    }
+}
+
 enum AmberGlassSurfaceShape {
     case capsule
     case roundedRectangle(cornerRadius: CGFloat)
