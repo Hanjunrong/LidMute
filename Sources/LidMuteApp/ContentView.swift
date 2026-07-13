@@ -23,34 +23,30 @@ struct ContentView: View {
                     HeaderBar(model: model)
                         .frame(height: CGFloat(VisualLayoutMetrics.headerHeight))
 
-                    TightCardDeck {
+                    GuardHero(model: model)
+                        .frame(height: CGFloat(VisualLayoutMetrics.guardCardHeight))
+
+                    HStack(alignment: .top, spacing: cardSpacing) {
                         VStack(spacing: cardSpacing) {
-                            GuardHero(model: model)
-                                .frame(height: CGFloat(VisualLayoutMetrics.guardCardHeight))
-
-                            HStack(alignment: .top, spacing: cardSpacing) {
-                                VStack(spacing: cardSpacing) {
-                                    AutomationCard(model: model)
-                                        .frame(maxWidth: .infinity)
-                                        .frame(height: CGFloat(VisualLayoutMetrics.automationCardHeight))
-                                    SimulationCard(model: model)
-                                        .frame(maxWidth: .infinity)
-                                        .frame(height: CGFloat(VisualLayoutMetrics.simulationCardHeight))
-                                }
+                            AutomationCard(model: model)
                                 .frame(maxWidth: .infinity)
-                                .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
-
-                                NowPlayingCard(model: model)
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
-                            }
-                            .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
-
-                            ActivityTimeline(model: model, viewportHeight: timelineViewportHeight)
+                                .frame(height: CGFloat(VisualLayoutMetrics.automationCardHeight))
+                            SimulationCard(model: model)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: CGFloat(VisualLayoutMetrics.simulationCardHeight))
                         }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
+
+                        NowPlayingCard(model: model)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
                     }
-                    .frame(maxHeight: .infinity, alignment: .top)
+                    .frame(height: CGFloat(VisualLayoutMetrics.middleDeckHeight))
+
+                    ActivityTimeline(model: model, viewportHeight: timelineViewportHeight)
                 }
+                .frame(maxHeight: .infinity, alignment: .top)
                 .padding(appPadding)
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             }
