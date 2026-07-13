@@ -40,6 +40,37 @@ Fix: `.frame(maxHeight: .infinity)` 让内容先扩展到 frame 可用空间，p
 
 This applies to all cards (GuardHero, AutomationCard, SimulationCard, NowPlayingCard) except ActivityTimeline, which has dynamic height and no fixed `.frame(height:)`.
 
+## Debug layout
+
+When cards have unexpected gaps, check frame boundaries vs card backgrounds:
+
+```swift
+// Replace amberGlassCard with colored bg + border to see the frame:
+// .amberGlassCard(padding: 0, cornerRadius: 14)
+.background(Color.red, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+.overlay(
+    RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .stroke(.white.opacity(0.45), lineWidth: 1.2)
+)
+```
+
+Then add `.border()` on container views to see their frame bounds:
+
+```swift
+GuardHero(model: model)
+    .frame(height: 148)
+    .border(Color.blue, width: 2)   // ← 看 frame 边界
+
+HStack(...)
+    .frame(height: 190)
+    .border(Color.green, width: 1)  // ← 看容器边界
+```
+
+- Red background = card 实际绘制范围
+- Colored border = frame 约束边界
+- 两者不重合 → 内容没撑满 frame（缺 `.frame(maxHeight: .infinity)`）
+- 容器边框间有间隙 → spacing 或布局结构问题
+
 ### Notch at HStack inner column boundary
 
 The HStack splits into two columns (left `VStack` + `NowPlayingCard`). At the top edge (GuardHero boundary), both cards' inner-facing corners (cr=14) create a small notch. This is an inherent artifact of per-card rounded corners with zero spacing — distinguishable from the bottom boundary (HStack → ActivityTimeline) because ActivityTimeline is full-width and its straight top edge fills the notch.
