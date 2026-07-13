@@ -168,6 +168,7 @@ private struct GuardHero: View {
                 )
             )
         }
+        .frame(maxHeight: .infinity)
         .padding(10)
         .amberGlassCard(padding: 0, cornerRadius: 14)
     }
@@ -266,6 +267,7 @@ private struct AutomationCard: View {
                 .lineLimit(1)
 
         }
+        .frame(maxHeight: .infinity)
         .opacity(model.isEnabled ? 1 : 0.62)
         .padding(10)
         .amberGlassCard(padding: 0, cornerRadius: 14)
@@ -330,6 +332,7 @@ private struct SimulationCard: View {
                 .accessibilityLabel("重置模拟状态")
             }
         }
+        .frame(maxHeight: .infinity)
         .padding(10)
         .amberGlassCard(padding: 0, cornerRadius: 14)
     }
@@ -399,6 +402,7 @@ private struct NowPlayingCard: View {
 
             Spacer(minLength: 0)
         }
+        .frame(maxHeight: .infinity)
         .padding(8)
         .amberGlassCard(padding: 0, cornerRadius: 14)
     }
