@@ -71,6 +71,18 @@ HStack(...)
 - 两者不重合 → 内容没撑满 frame（缺 `.frame(maxHeight: .infinity)`）
 - 容器边框间有间隙 → spacing 或布局结构问题
 
+### Debug workflow
+
+When user reports a visual layout issue:
+
+1. **Apply debug modifications**: swap `amberGlassCard` → red bg, add `.border()` to containers as needed
+2. **Build & package**: `zsh Scripts/make-app-bundle.sh`
+3. **Do NOT commit** debug code
+4. User inspects the visual, reports findings (which borders have gaps, which backgrounds don't fill)
+5. Revert all debug changes with `git checkout -- Sources/`
+6. Fix the actual root cause based on findings
+7. Build & package for final verification
+
 ### Notch at HStack inner column boundary
 
 The HStack splits into two columns (left `VStack` + `NowPlayingCard`). At the top edge (GuardHero boundary), both cards' inner-facing corners (cr=14) create a small notch. This is an inherent artifact of per-card rounded corners with zero spacing — distinguishable from the bottom boundary (HStack → ActivityTimeline) because ActivityTimeline is full-width and its straight top edge fills the notch.
