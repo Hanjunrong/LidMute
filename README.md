@@ -1,13 +1,21 @@
 # LidMute
 
+LidMute 是一个面向 macOS 的菜单栏守卫应用，用来在合盖、夜间静音和特定音频场景下保护内建扬声器，避免意外外放。应用提供主界面、状态栏入口、本地事件时间线，以及可选的 Chrome 扩展桥接能力。
+
 界面修改必须遵守 [中文设计说明中的强制视觉设计原则](docs/LidMute-中文设计说明.md#三视觉设计原则强制)。
 
-LidMute prevents sound from the current default built-in output while the Mac lid
-is closed. It remains available from the menu bar and keeps a permanent local
-event timeline. The bundled Chrome extension adds tab-level evidence for Chrome
-audio events, including a tab title, URL, tab ID, and `audible` transition.
+## 项目功能
 
-## Build and Verify
+- 合盖守卫：检测 Mac 合盖状态，在守卫开启时保护内建扬声器。
+- 状态栏控制：可从菜单栏快速开启或关闭守卫。
+- 轻量模式：可隐藏主窗口和 Dock 图标，仅保留状态栏入口。
+- 夜间静音：支持北京时间时段配置，结合屏幕休眠状态自动保护扬声器。
+- 模拟合盖 / 开盖：可在主界面内模拟状态变化，便于调试状态机。
+- 媒体控制：支持系统级上一首、下一首、播放 / 暂停。
+- Chrome 标签页音频桥接：可记录 Chrome 标签页标题、URL、窗口 ID、标签 ID 和 `audible` 变化，辅助定位音频来源。
+- 本地事件时间线：所有关键动作会记录到本地，方便回溯和排查。
+
+## 构建与验证
 
 ```zsh
 cd /Users/han/temp/workspace/LidMute
@@ -15,81 +23,52 @@ chmod +x Scripts/*.sh
 Scripts/run-smoke-check.sh
 ```
 
-This machine's Command Line Tools do not expose XCTest or Swift Testing, so the
-repository uses a no-dependency executable behavior suite instead of `swift test`.
-The smoke check proves compilation plus core fake-adapter and extension-frame
-behavior. It does not prove real lid events, real CoreAudio control, or a loaded
-Chrome extension; use the manual verification below for those integrations.
+这台机器的 Command Line Tools 不提供 XCTest 或 Swift Testing，因此仓库使用无依赖的可执行行为测试套件代替 `swift test`。该检查能验证编译、核心假适配器行为以及扩展帧解析，但不能覆盖真实合盖事件、真实 CoreAudio 控制和已加载的 Chrome 扩展。
 
-## Run
+## 运行
 
 ```zsh
 CLANG_MODULE_CACHE_PATH=/tmp/lidmute-clang-cache \
 swift run --disable-sandbox --scratch-path /tmp/lidmute-build LidMuteApp
 ```
 
-To make a local `.app` bundle after a successful build:
+如果要生成并运行本地 `.app`：
 
 ```zsh
 zsh Scripts/make-app-bundle.sh
 open dist/LidMute.app
 ```
 
-`make-app-bundle.sh` always rebuilds the package immediately before copying
-binaries into the app bundle and refuses to package a binary older than the
-current `Sources` tree. The build step cannot be bypassed with an environment
-variable or redirected to a previously generated binary directory.
+`make-app-bundle.sh` 会在打包前执行视觉原则检查，并强制基于当前源码重新构建，避免把旧二进制复制进 `dist/LidMute.app`。
 
-The generated bundle is unsigned and intended for local use. Code signing and
-notarization require a full Xcode installation and a Developer ID certificate.
+## Chrome 标签页日志能力
 
-The app also provides a configurable Beijing-time screen-sleep schedule. When
-the guard is enabled, the display is asleep, and the current time is inside the
-configured interval (default `00:00-08:00`), the built-in speaker is muted. The
-schedule ending or disabling the guard restores the state captured before the
-night interval. The dashboard lists current CoreAudio output processes and
-sends system-level macOS previous, next, and play/pause media key events.
-
-Turn on the guard, then use **模拟合盖** and **模拟开盖** to verify the state
-machine without physically closing the lid. Real lid-state polling occurs every
-second through IOKit while the app is running. After reset, **模拟合盖** is the
-available action and **模拟开盖** is disabled. On lid-open, LidMute restores the captured volume but keeps the
-built-in speaker muted. Manually disabling the guard, either while closed or
-after reopening, fully restores the mute and volume state captured before the
-protected interval.
-
-## Chrome Tab-Level Logging
-
-1. Open `chrome://extensions`, turn on Developer mode, and click Load unpacked.
-2. Select `ChromeExtension` from this repository and copy its generated extension ID.
-3. Register the built helper with that ID:
+1. 打开 `chrome://extensions`。
+2. 开启开发者模式并加载仓库内的 `ChromeExtension` 目录。
+3. 复制生成的扩展 ID。
+4. 运行注册脚本，把扩展 ID 写入 native host 配置。
 
 ```zsh
 Scripts/register-chrome-host.sh /tmp/lidmute-build/arm64-apple-macosx/debug/LidMuteNativeHost EXTENSION_ID
 ```
 
-4. Keep LidMute running, open a media tab, and inspect the Activity Log. A Chrome
-   `audible` transition is recorded with its title, URL, window ID, and tab ID.
+注册成功后，LidMute 在活动日志里可以记录 Chrome 标签页的标题、URL、窗口 ID、标签 ID 和音频状态变化。
 
-The extension requests only `tabs`, `nativeMessaging`, and `storage`. The host
-accepts only the extension origin written by the registration script. Chrome
-requires you to explicitly enable an extension in Incognito windows; it is off by default.
+## 手动验证建议
 
-## Limitations
+1. 启动 LidMute，开启守卫，确认关闭主窗口后状态栏开关仍可用。
+2. 在未接有线耳机时，使用“模拟合盖”确认时间线出现静音保护事件。
+3. 启用轻量模式，确认主窗口和 Dock 图标隐藏，但状态栏入口仍保留。
+4. 关闭轻量模式，确认主窗口恢复。
+5. 加载 Chrome 扩展并注册扩展 ID，播放媒体后确认日志出现对应标签页信息。
 
-- The safeguard mutes sound output; it does not pause a video or terminate a process.
-- macOS provides process-level audio activity. Exact Chrome tab attribution is
-  supplied only while the bundled extension and native host are installed.
-- A built-in audio device may be shared by analog headphones on some hardware.
-  LidMute fails closed and only mutes a built-in route whose current CoreAudio
-  output data source clearly identifies it as a speaker. An unrecognized route
-  is left untouched.
+## 已知限制
 
-## Manual Integration Check
+- LidMute 保护的是声音输出，不会主动暂停视频或结束进程。
+- macOS 原生只提供进程级音频活动，Chrome 的标签页级归因依赖扩展和 native host。
+- 某些硬件上的内建音频设备可能和模拟耳机共享路由。LidMute 在无法明确识别为内建扬声器时会拒绝修改该路由，以避免误操作。
 
-1. Start LidMute, enable the guard, and verify the menu-bar toggle remains usable after closing the window.
-2. With no wired headphones attached, use Simulate Lid Closed and confirm the event timeline shows mute enforcement.
-3. Load the Chrome extension and register its generated extension ID. Start media in a Youku tab and confirm the log includes its title, URL, window ID, and tab ID.
-4. Restart LidMute, then confirm the same Chrome `eventId` is not recorded again.
-5. Test wired headphones separately. If the app displays an unavailable target, it is intentionally refusing to alter an ambiguous shared built-in route.
-6. Keep one audio process active for several seconds and confirm it creates one activation record instead of one record per polling interval.
+## 补充说明
+
+- [README.zh-CN](README.zh-CN.md) 提供简版中文说明。
+- `dist/` 和 `.build/` 都不纳入版本控制。
