@@ -18,6 +18,7 @@ enum ChromeConnectionState: Equatable {
 @MainActor
 final class AppViewModel: ObservableObject {
     @Published var isEnabled = false
+    @Published var isLightweightModeEnabled = false
     @Published private(set) var statusText = "守卫未开启"
     @Published private(set) var events: [LidMuteEvent] = []
     @Published private(set) var chromeBridgeStatus = "等待 Chrome 扩展连接"
@@ -53,6 +54,7 @@ final class AppViewModel: ObservableObject {
     private let mediaController = SystemMediaController()
     private let nightPreferences = NightProtectionPreferences()
     private var effectiveNightSchedule = NightSchedule(startMinutes: 0, endMinutes: 8 * 60)
+    private var hasStarted = false
 
     init() {
         self.applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -79,6 +81,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
         if lidMonitor == nil {
             let monitor = SystemLidMonitor { [weak self] closed in self?.receiveSystemLidState(closed) }
             monitor.start()
@@ -155,6 +159,11 @@ final class AppViewModel: ObservableObject {
         simulatedLidState = .opened
         if isEnabled { coordinator.receiveLidState(closed: false, simulated: true) }
         refresh()
+    }
+
+    func setLightweightModeEnabled(_ enabled: Bool) {
+        guard isLightweightModeEnabled != enabled else { return }
+        isLightweightModeEnabled = enabled
     }
 
     func setNightScheduleEnabled(_ enabled: Bool) {

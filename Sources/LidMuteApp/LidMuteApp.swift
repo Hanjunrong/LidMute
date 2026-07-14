@@ -1,27 +1,68 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+final class LidMuteAppDelegate: NSObject, NSApplicationDelegate {
+    let model = AppViewModel()
+    private let presentationController = ApplicationPresentationController()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        model.start()
+        presentationController.applyLightweightMode(model.isLightweightModeEnabled)
+    }
+
+    func setLightweightModeEnabled(_ enabled: Bool) {
+        model.setLightweightModeEnabled(enabled)
+        presentationController.applyLightweightMode(enabled)
+    }
+}
 
 @main
 struct LidMuteApp: App {
-    @StateObject private var model = AppViewModel()
+    @NSApplicationDelegateAdaptor(LidMuteAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup("LidMute") {
-            ContentView(model: model)
-                .task { model.start() }
+            ContentView(model: appDelegate.model)
         }
         .defaultSize(width: 1120, height: 680)
-        MenuBarExtra("LidMute", systemImage: model.isEnabled ? "speaker.slash.fill" : "speaker") {
-            Button(model.isEnabled ? "关闭合盖监控系统外放守卫" : "开启合盖监控系统外放守卫") {
-                model.setEnabled(!model.isEnabled)
+
+        MenuBarExtra {
+            MenuBarMenu(model: appDelegate.model) { enabled in
+                appDelegate.setLightweightModeEnabled(enabled)
             }
-            Divider()
-            Button("模拟合盖", action: model.simulateLidClosed)
-                .disabled(model.simulatedLidState == .closed)
-            Button("模拟开盖", action: model.simulateLidOpened)
-                .disabled(model.simulatedLidState == .opened)
-            Button("重置模拟状态", action: model.resetSimulationState)
-            Divider()
-            Button("退出 LidMute") { NSApplication.shared.terminate(nil) }
+        } label: {
+            MenuBarLabel(model: appDelegate.model)
         }
+    }
+}
+
+private struct MenuBarLabel: View {
+    @ObservedObject var model: AppViewModel
+
+    var body: some View {
+        Label("LidMute", systemImage: model.isEnabled ? "speaker.slash.fill" : "speaker")
+    }
+}
+
+private struct MenuBarMenu: View {
+    @ObservedObject var model: AppViewModel
+    let setLightweightModeEnabled: (Bool) -> Void
+
+    var body: some View {
+        Button(model.isEnabled ? "关闭守卫" : "开启守卫") {
+            model.setEnabled(!model.isEnabled)
+        }
+        Toggle(
+            "轻量模式",
+            isOn: Binding(
+                get: { model.isLightweightModeEnabled },
+                set: { enabled in
+                    setLightweightModeEnabled(enabled)
+                }
+            )
+        )
+        Divider()
+        Button("退出 LidMute") { NSApplication.shared.terminate(nil) }
     }
 }
