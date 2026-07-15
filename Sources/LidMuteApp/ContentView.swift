@@ -66,14 +66,13 @@ private struct HeaderBar: View {
 
     var body: some View {
         HStack(spacing: 13) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(AmberVisualTheme.amber.opacity(0.18))
-                Image(systemName: "shield.lefthalf.filled")
-                    .font(.system(size: 23, weight: .semibold))
-                    .foregroundStyle(AmberVisualTheme.amber)
-            }
-            .frame(width: 46, height: 46)
+            AuroraSymbolTile(
+                systemImage: "shield.lefthalf.filled",
+                tint: AmberVisualTheme.amber,
+                secondaryTint: AmberVisualTheme.seaGlass,
+                size: 46,
+                cornerRadius: 13
+            )
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("LidMute")
@@ -180,7 +179,7 @@ private struct GuardHero: View {
         }
         .frame(maxHeight: .infinity)
         .padding(10)
-        .amberGlassCard(padding: 0, cornerRadius: 14)
+        .amberGlassCard(role: .hero, padding: 0, cornerRadius: 14)
     }
 
     private var heroTitle: String {
@@ -224,7 +223,12 @@ private struct AutomationCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack {
-                CardTitle(title: "自动保护", subtitle: "合盖与夜间策略", systemImage: "sparkles")
+                CardTitle(
+                    title: "自动保护",
+                    subtitle: "合盖与夜间策略",
+                    systemImage: "sparkles",
+                    tint: AmberVisualTheme.amber
+                )
                 Spacer()
                 Toggle(
                     "",
@@ -285,7 +289,7 @@ private struct AutomationCard: View {
         .frame(maxHeight: .infinity)
         .opacity(model.isEnabled ? 1 : 0.62)
         .padding(10)
-        .amberGlassCard(padding: 0, cornerRadius: 14)
+        .amberGlassCard(role: .standard, padding: 0, cornerRadius: 14)
     }
 }
 
@@ -294,7 +298,12 @@ private struct SimulationCard: View {
 
     var body: some View {
         HStack(spacing: 16) {
-            CardTitle(title: "模拟测试", subtitle: "独立验证合盖状态", systemImage: "testtube.2")
+            CardTitle(
+                title: "模拟测试",
+                subtitle: "独立验证合盖状态",
+                systemImage: "testtube.2",
+                tint: AmberVisualTheme.mistBlue
+            )
 
             Spacer()
 
@@ -349,7 +358,7 @@ private struct SimulationCard: View {
         }
         .frame(maxHeight: .infinity)
         .padding(10)
-        .amberGlassCard(padding: 0, cornerRadius: 14)
+        .amberGlassCard(role: .standard, padding: 0, cornerRadius: 14)
     }
 }
 
@@ -364,7 +373,12 @@ private struct NowPlayingCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                CardTitle(title: "当前声音", subtitle: "CoreAudio 实时", systemImage: "waveform")
+                CardTitle(
+                    title: "当前声音",
+                    subtitle: "CoreAudio 实时",
+                    systemImage: "waveform",
+                    tint: AmberVisualTheme.seaGlass
+                )
                 Spacer()
                 Circle()
                     .fill(model.currentAudioProcesses.isEmpty ? Color.secondary.opacity(0.4) : AmberVisualTheme.seaGlass)
@@ -424,7 +438,7 @@ private struct NowPlayingCard: View {
         }
         .frame(maxHeight: .infinity)
         .padding(8)
-        .amberGlassCard(padding: 0, cornerRadius: 14)
+        .amberGlassCard(role: .media, padding: 0, cornerRadius: 14)
     }
 }
 
@@ -438,14 +452,13 @@ private struct AudioProcessRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(AmberVisualTheme.seaGlass.opacity(0.12))
-                Image(systemName: "waveform")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(AmberVisualTheme.seaGlass)
-            }
-            .frame(width: 32, height: 32)
+            AuroraSymbolTile(
+                systemImage: "waveform",
+                tint: AmberVisualTheme.seaGlass,
+                secondaryTint: AmberVisualTheme.mistBlue,
+                size: 32,
+                cornerRadius: 9
+            )
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(process.name)
@@ -469,6 +482,7 @@ private struct CardTitle: View {
     let title: String
     let subtitle: String
     let systemImage: String
+    var tint: Color = AmberVisualTheme.amber
     @Environment(\.colorScheme) private var colorScheme
 
     private var palette: AmberThemePalette {
@@ -477,9 +491,13 @@ private struct CardTitle: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            Image(systemName: systemImage)
-                .font(.subheadline.weight(.bold))
-                .foregroundStyle(AmberVisualTheme.amber)
+            AuroraSymbolTile(
+                systemImage: systemImage,
+                tint: tint,
+                secondaryTint: AmberVisualTheme.seaGlass,
+                size: 32,
+                cornerRadius: 9
+            )
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .font(.headline)
@@ -505,7 +523,12 @@ private struct ActivityTimeline: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                CardTitle(title: "活动时间线", subtitle: "永久保存在本机", systemImage: "clock.arrow.circlepath")
+                CardTitle(
+                    title: "活动时间线",
+                    subtitle: "永久保存在本机",
+                    systemImage: "clock.arrow.circlepath",
+                    tint: AmberVisualTheme.mistBlue
+                )
                 Spacer()
                 Text("\(model.events.count) 条")
                     .font(.caption.monospacedDigit())
@@ -550,7 +573,7 @@ private struct ActivityTimeline: View {
             .frame(height: max(CGFloat(VisualLayoutMetrics.timelineDefaultViewportHeight), viewportHeight))
         }
         .padding(10)
-        .amberGlassCard(padding: 0, cornerRadius: 14)
+        .amberGlassCard(role: .timeline, padding: 0, cornerRadius: 14)
     }
 }
 
@@ -567,14 +590,13 @@ private struct EventTimelineRow: View {
     var body: some View {
         let presentation = EventPresentation(kind: event.kind)
         HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(accent.opacity(0.13))
-                Image(systemName: presentation.symbolName)
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(accent)
-            }
-            .frame(width: 34, height: 34)
+            AuroraSymbolTile(
+                systemImage: presentation.symbolName,
+                tint: accent,
+                secondaryTint: AmberVisualTheme.mistBlue,
+                size: 34,
+                cornerRadius: 17
+            )
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(presentation.title)

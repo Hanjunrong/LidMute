@@ -32,9 +32,27 @@ struct LiquidGlassButtonStyle: ButtonStyle {
         switch shape {
         case .capsule:
             label(configuration)
+                .modifier(
+                    AuroraControlChrome(
+                        tint: tint,
+                        shape: .capsule,
+                        isEmphasized: isEmphasized,
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled
+                    )
+                )
                 .glassEffect(glass.interactive(), in: .capsule)
         case .roundedRectangle:
             label(configuration)
+                .modifier(
+                    AuroraControlChrome(
+                        tint: tint,
+                        shape: .roundedRectangle,
+                        isEmphasized: isEmphasized,
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled
+                    )
+                )
                 .glassEffect(glass.interactive(), in: .rect(cornerRadius: 13))
         }
     }
@@ -44,12 +62,26 @@ struct LiquidGlassButtonStyle: ButtonStyle {
         switch shape {
         case .capsule:
             label(configuration)
-                .background(palette.controlFill, in: Capsule())
-                .overlay(Capsule().stroke(tint.opacity(isEmphasized ? 0.72 : 0.36), lineWidth: 1))
+                .modifier(
+                    AuroraControlChrome(
+                        tint: tint,
+                        shape: .capsule,
+                        isEmphasized: isEmphasized,
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled
+                    )
+                )
         case .roundedRectangle:
             label(configuration)
-                .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(tint.opacity(isEmphasized ? 0.72 : 0.36), lineWidth: 1))
+                .modifier(
+                    AuroraControlChrome(
+                        tint: tint,
+                        shape: .roundedRectangle,
+                        isEmphasized: isEmphasized,
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled
+                    )
+                )
         }
     }
 
@@ -88,14 +120,89 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
         if #available(macOS 26.0, *) {
             configuration.label
                 .frame(width: size, height: size)
+                .modifier(
+                    AuroraControlChrome(
+                        tint: tint,
+                        shape: .circle,
+                        isEmphasized: isEmphasized,
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled
+                    )
+                )
                 .glassEffect(.regular.tint(tint.opacity(isEmphasized ? 0.55 : 0.28)).interactive(), in: .circle)
                 .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled, palette: palette))
         } else {
             configuration.label
                 .frame(width: size, height: size)
-                .background(palette.controlFill, in: Circle())
-                .overlay(Circle().stroke(tint.opacity(isEmphasized ? 0.72 : 0.36), lineWidth: 1))
+                .modifier(
+                    AuroraControlChrome(
+                        tint: tint,
+                        shape: .circle,
+                        isEmphasized: isEmphasized,
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled
+                    )
+                )
                 .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled, palette: palette))
+        }
+    }
+}
+
+private enum AuroraControlShape {
+    case capsule
+    case roundedRectangle
+    case circle
+}
+
+private struct AuroraControlChrome: ViewModifier {
+    let tint: Color
+    let shape: AuroraControlShape
+    let isEmphasized: Bool
+    let isPressed: Bool
+    let isEnabled: Bool
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let palette = AmberVisualTheme.palette(for: colorScheme)
+        let gradient = LinearGradient(
+            colors: [
+                palette.glassHighlight.opacity(isPressed ? 0.18 : 0.34),
+                tint.opacity(isEnabled ? (isEmphasized ? 0.26 : 0.14) : 0.07),
+                isEnabled ? palette.controlFill : palette.disabledFill,
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        let stroke = LinearGradient(
+            colors: [
+                palette.glassHighlight.opacity(isPressed ? 0.35 : 0.72),
+                tint.opacity(isEnabled ? (isEmphasized ? 0.70 : 0.38) : 0.18),
+                palette.border,
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        let shadow = isPressed ? palette.cardShadow.opacity(0.45) : palette.cardShadow.opacity(0.78)
+
+        switch shape {
+        case .capsule:
+            content
+                .background(gradient, in: Capsule())
+                .overlay(Capsule().stroke(stroke, lineWidth: isEmphasized ? 1.1 : 0.85))
+                .shadow(color: shadow, radius: isPressed ? 3 : 7, y: isPressed ? 1 : 4)
+        case .roundedRectangle:
+            let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+            content
+                .background(gradient, in: shape)
+                .overlay(shape.stroke(stroke, lineWidth: isEmphasized ? 1.1 : 0.85))
+                .shadow(color: shadow, radius: isPressed ? 3 : 7, y: isPressed ? 1 : 4)
+        case .circle:
+            content
+                .background(gradient, in: Circle())
+                .overlay(Circle().stroke(stroke, lineWidth: isEmphasized ? 1.1 : 0.85))
+                .shadow(color: shadow, radius: isPressed ? 3 : 7, y: isPressed ? 1 : 4)
         }
     }
 }
