@@ -70,6 +70,14 @@ fi
 grep -q "AmberVisualTheme.palette" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift" \
     || fail "LiquidGlassControls must consume the adaptive semantic theme palette"
 
+controls_file="$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift"
+grep -q "struct AuroraControlChrome" "$controls_file" \
+    || fail "Liquid Glass controls must share Aurora optical chrome"
+
+interactive_count="$(grep -oF '.interactive()' "$controls_file" | wc -l | tr -d ' ')"
+[[ "$interactive_count" -ge 2 ]] \
+    || fail "Native Liquid Glass button paths must remain interactive"
+
 if grep -R -qF '.background(.white.opacity(' "$content_view" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift"; then
     fail "Dashboard surfaces must use adaptive theme tokens instead of fixed white opacity"
 fi
