@@ -30,6 +30,23 @@ fi
 grep -q "TightCardDeck" "$theme_file" \
     || fail "Card decks must provide a continuous backing so rounded adjacent cards have no visible cracks"
 
+grep -q "enum AuroraCardRole" "$theme_file" \
+    || fail "Aurora cards must expose semantic surface roles"
+
+grep -q "struct AuroraSymbolTile" "$theme_file" \
+    || fail "Aurora iconography must use the shared layered symbol tile"
+
+grep -q "func amberGlassCard" "$theme_file" \
+    && grep -q "role: AuroraCardRole" "$theme_file" \
+    || fail "Aurora cards must require an explicit semantic role"
+
+grep -q "LinearGradient" "$theme_file" \
+    || fail "Aurora surfaces must include gradient depth"
+
+if grep -qF 'Color.black.opacity(0.22)' "$theme_file"; then
+    fail "Card decks must not fall back to the obsolete flat black fill"
+fi
+
 for token in surfacePrimary surfaceSecondary surfaceTertiary primaryText secondaryText border; do
     grep -q "$token" "$theme_file" \
         || fail "Adaptive theme must define semantic token: $token"
