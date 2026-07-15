@@ -19,12 +19,12 @@ guard let rep = NSBitmapImageRep(
     bytesPerRow: 0,
     bitsPerPixel: 0
 ) else {
-    fputs("Unable to create image representation\\n", stderr)
+    fputs("Unable to create image representation\n", stderr)
     exit(1)
 }
 
 guard let graphics = NSGraphicsContext(bitmapImageRep: rep) else {
-    fputs("Unable to create graphics context\\n", stderr)
+    fputs("Unable to create graphics context\n", stderr)
     exit(1)
 }
 
@@ -56,6 +56,18 @@ func symbol(_ name: String, in rect: NSRect, tint: NSColor, weight: NSFont.Weigh
     tinted.draw(in: rect)
 }
 
+func drawGlow(in rect: NSRect, tint: NSColor, blur: CGFloat) {
+    NSGraphicsContext.saveGraphicsState()
+    let shadow = NSShadow()
+    shadow.shadowBlurRadius = blur
+    shadow.shadowOffset = .zero
+    shadow.shadowColor = tint
+    shadow.set()
+    tint.withAlphaComponent(0.72).setFill()
+    NSBezierPath(ovalIn: rect).fill()
+    NSGraphicsContext.restoreGraphicsState()
+}
+
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = graphics
 graphics.imageInterpolation = .high
@@ -63,78 +75,105 @@ graphics.cgContext.setAllowsAntialiasing(true)
 graphics.cgContext.setShouldAntialias(true)
 graphics.cgContext.clear(canvas)
 
-// A restrained, macOS-native base lets the mark remain recognisable at Dock size.
+// A future-facing Aurora Glass superellipse: warm protection light flows into
+// cool connected-state color while keeping enough contrast at Dock size.
 let baseRect = NSRect(x: 48, y: 48, width: 928, height: 928)
-let base = NSBezierPath(roundedRect: baseRect, xRadius: 214, yRadius: 214)
-let shadow = NSShadow()
-shadow.shadowBlurRadius = 32
-shadow.shadowOffset = NSSize(width: 0, height: -14)
-shadow.shadowColor = color(29, 34, 38, 0.20)
-shadow.set()
-gradient(base, [color(255, 253, 248), color(232, 239, 237)], angle: 45)
+let base = NSBezierPath(roundedRect: baseRect, xRadius: 220, yRadius: 220)
+let baseShadow = NSShadow()
+baseShadow.shadowBlurRadius = 44
+baseShadow.shadowOffset = NSSize(width: 0, height: -16)
+baseShadow.shadowColor = color(26, 44, 52, 0.28)
+baseShadow.set()
+gradient(
+    base,
+    [color(255, 190, 121), color(136, 211, 207), color(119, 163, 232)],
+    angle: 38
+)
+NSGraphicsContext.restoreGraphicsState()
+
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = graphics
+
+// Refracted color fields sit underneath the glass plate.
+base.addClip()
+drawGlow(in: NSRect(x: -90, y: 550, width: 560, height: 560), tint: color(255, 132, 48, 0.54), blur: 92)
+drawGlow(in: NSRect(x: 560, y: -40, width: 560, height: 560), tint: color(42, 205, 191, 0.50), blur: 96)
+drawGlow(in: NSRect(x: 500, y: 570, width: 460, height: 380), tint: color(128, 146, 255, 0.36), blur: 88)
+NSGraphicsContext.restoreGraphicsState()
+
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = graphics
+
+// Outer optical rim catches light at the upper-left and fades toward the edge.
+let outerRim = NSBezierPath(roundedRect: NSRect(x: 72, y: 72, width: 880, height: 880), xRadius: 198, yRadius: 198)
+stroke(outerRim, color(255, 255, 255, 0.76), width: 7)
+
+let plateRect = NSRect(x: 126, y: 126, width: 772, height: 772)
+let plate = NSBezierPath(roundedRect: plateRect, xRadius: 172, yRadius: 172)
+gradient(
+    plate,
+    [color(255, 255, 255, 0.54), color(235, 250, 250, 0.28), color(244, 247, 255, 0.18)],
+    angle: 48
+)
+stroke(plate, color(255, 255, 255, 0.76), width: 6)
+
+// A second inset line suggests a layered glass edge rather than a flat tile.
+let innerRim = NSBezierPath(roundedRect: NSRect(x: 145, y: 145, width: 734, height: 734), xRadius: 154, yRadius: 154)
+stroke(innerRim, color(255, 255, 255, 0.28), width: 3)
+
+// The large shield is the primary semantic silhouette and remains legible at 32px.
+symbol(
+    "shield.fill",
+    in: NSRect(x: 278, y: 258, width: 468, height: 500),
+    tint: color(245, 252, 251, 0.88),
+    weight: .semibold
+)
+
+// A glass mute badge gives LidMute its product-specific meaning.
+let badgeRect = NSRect(x: 548, y: 236, width: 270, height: 270)
+let badge = NSBezierPath(roundedRect: badgeRect, xRadius: 92, yRadius: 92)
+let badgeShadow = NSShadow()
+badgeShadow.shadowBlurRadius = 34
+badgeShadow.shadowOffset = NSSize(width: 0, height: -10)
+badgeShadow.shadowColor = color(71, 54, 45, 0.26)
+badgeShadow.set()
+gradient(badge, [color(255, 178, 79, 0.96), color(242, 101, 54, 0.94)], angle: 45)
 
 NSGraphicsContext.restoreGraphicsState()
 NSGraphicsContext.saveGraphicsState()
 NSGraphicsContext.current = graphics
 
-let inset = NSBezierPath(roundedRect: NSRect(x: 82, y: 82, width: 860, height: 860), xRadius: 184, yRadius: 184)
-stroke(inset, color(255, 255, 255, 0.78), width: 5)
+stroke(badge, color(255, 255, 255, 0.72), width: 5)
+symbol(
+    "speaker.slash.fill",
+    in: NSRect(x: 600, y: 288, width: 166, height: 166),
+    tint: color(255, 255, 255, 0.96),
+    weight: .semibold
+)
 
-// The main object is a shut clamshell: two shallow planes, not an upright display.
-let lid = NSBezierPath()
-lid.move(to: NSPoint(x: 211, y: 561))
-lid.line(to: NSPoint(x: 778, y: 561))
-lid.curve(to: NSPoint(x: 812, y: 530), controlPoint1: NSPoint(x: 796, y: 561), controlPoint2: NSPoint(x: 812, y: 548))
-lid.line(to: NSPoint(x: 755, y: 394))
-lid.curve(to: NSPoint(x: 725, y: 375), controlPoint1: NSPoint(x: 749, y: 382), controlPoint2: NSPoint(x: 739, y: 375))
-lid.line(to: NSPoint(x: 264, y: 375))
-lid.curve(to: NSPoint(x: 238, y: 394), controlPoint1: NSPoint(x: 250, y: 375), controlPoint2: NSPoint(x: 242, y: 382))
-lid.line(to: NSPoint(x: 178, y: 530))
-lid.curve(to: NSPoint(x: 211, y: 561), controlPoint1: NSPoint(x: 178, y: 548), controlPoint2: NSPoint(x: 194, y: 561))
-lid.close()
-gradient(lid, [color(18, 28, 32), color(39, 66, 67)], angle: 52)
+// Restrained specular highlights establish the shared upper-left light source.
+let topHighlight = NSBezierPath()
+topHighlight.move(to: NSPoint(x: 206, y: 812))
+topHighlight.curve(
+    to: NSPoint(x: 676, y: 862),
+    controlPoint1: NSPoint(x: 340, y: 904),
+    controlPoint2: NSPoint(x: 548, y: 904)
+)
+stroke(topHighlight, color(255, 255, 255, 0.50), width: 12)
 
-let lidReflection = NSBezierPath()
-lidReflection.move(to: NSPoint(x: 264, y: 552))
-lidReflection.line(to: NSPoint(x: 725, y: 552))
-stroke(lidReflection, color(171, 237, 224, 0.36), width: 6)
-
-let base = NSBezierPath(roundedRect: NSRect(x: 164, y: 324, width: 664, height: 72), xRadius: 36, yRadius: 36)
-gradient(base, [color(32, 45, 49), color(83, 108, 108)], angle: 0)
-let hingeLip = NSBezierPath(roundedRect: NSRect(x: 443, y: 347, width: 138, height: 16), xRadius: 8, yRadius: 8)
-color(218, 242, 235, 0.50).setFill()
-hingeLip.fill()
-
-// A quiet Apple reference on the closed lid; it stays secondary to the mute state.
-symbol("apple.logo", in: NSRect(x: 470, y: 442, width: 78, height: 78), tint: color(237, 246, 241, 0.88))
-
-let badge = NSBezierPath(ovalIn: NSRect(x: 606, y: 493, width: 182, height: 182))
-gradient(badge, [color(255, 190, 89), color(238, 96, 39)], angle: 45)
-
-let speaker = NSBezierPath()
-speaker.move(to: NSPoint(x: 642, y: 591))
-speaker.line(to: NSPoint(x: 671, y: 591))
-speaker.line(to: NSPoint(x: 708, y: 626))
-speaker.line(to: NSPoint(x: 708, y: 544))
-speaker.line(to: NSPoint(x: 671, y: 578))
-speaker.line(to: NSPoint(x: 642, y: 578))
-speaker.close()
-color(255, 250, 244).setFill()
-speaker.fill()
-
-let slash = NSBezierPath()
-slash.move(to: NSPoint(x: 682, y: 543))
-slash.line(to: NSPoint(x: 750, y: 623))
-stroke(slash, color(41, 55, 55), width: 17)
-
-let soundArc = NSBezierPath()
-soundArc.appendArc(withCenter: NSPoint(x: 707, y: 584), radius: 48, startAngle: -35, endAngle: 35, clockwise: false)
-stroke(soundArc, color(255, 250, 244, 0.76), width: 9)
+let badgeHighlight = NSBezierPath()
+badgeHighlight.move(to: NSPoint(x: 594, y: 438))
+badgeHighlight.curve(
+    to: NSPoint(x: 738, y: 468),
+    controlPoint1: NSPoint(x: 632, y: 482),
+    controlPoint2: NSPoint(x: 698, y: 492)
+)
+stroke(badgeHighlight, color(255, 255, 255, 0.42), width: 8)
 
 NSGraphicsContext.restoreGraphicsState()
 
 guard let png = rep.representation(using: .png, properties: [:]) else {
-    fputs("Unable to encode PNG\\n", stderr)
+    fputs("Unable to encode PNG\n", stderr)
     exit(1)
 }
 

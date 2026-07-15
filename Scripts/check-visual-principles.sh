@@ -78,6 +78,15 @@ interactive_count="$(grep -oF '.interactive()' "$controls_file" | wc -l | tr -d 
 [[ "$interactive_count" -ge 2 ]] \
     || fail "Native Liquid Glass button paths must remain interactive"
 
+icon_renderer="$repo_root/Scripts/render-app-icon.swift"
+grep -qF '"shield.fill"' "$icon_renderer" \
+    || fail "App icon must use the approved guard shield symbol"
+grep -qF '"speaker.slash.fill"' "$icon_renderer" \
+    || fail "App icon must use the approved muted-speaker symbol"
+if grep -qF 'apple.logo' "$icon_renderer"; then
+    fail "App icon must not depend on the obsolete Apple trademark detail"
+fi
+
 if grep -R -qF '.background(.white.opacity(' "$content_view" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift"; then
     fail "Dashboard surfaces must use adaptive theme tokens instead of fixed white opacity"
 fi
