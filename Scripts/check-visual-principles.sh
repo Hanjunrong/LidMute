@@ -55,6 +55,18 @@ done
 grep -q "AmberVisualTheme.palette" "$content_view" \
     || fail "ContentView must consume the adaptive semantic theme palette"
 
+for role in hero standard media timeline; do
+    grep -q "amberGlassCard(role: \.$role" "$content_view" \
+        || fail "ContentView must assign the Aurora card role: $role"
+done
+
+grep -q "AuroraSymbolTile(" "$content_view" \
+    || fail "Dashboard icons must use the shared Aurora symbol tile"
+
+if grep -qF '.fill(AmberVisualTheme.amber.opacity(0.18))' "$content_view"; then
+    fail "Header icon must not use the obsolete flat amber tile"
+fi
+
 grep -q "AmberVisualTheme.palette" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift" \
     || fail "LiquidGlassControls must consume the adaptive semantic theme palette"
 

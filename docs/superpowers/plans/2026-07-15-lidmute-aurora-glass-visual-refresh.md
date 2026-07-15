@@ -112,7 +112,7 @@ Run: `bash Scripts/check-visual-principles.sh`
 
 Expected: `PASS visual principle source checks`.
 
-Run: `swift run --disable-sandbox --scratch-path /tmp/lidmute-test-build LidMuteCoreBehaviorTests`
+Run: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-clang-cache SWIFTPM_CACHE_PATH=/tmp/lidmute-swiftpm-cache swift run --disable-sandbox --scratch-path /tmp/lidmute-test-build --triple arm64-apple-macosx26.0 LidMuteCoreBehaviorTests`
 
 Expected: exit 0 and all `PASS` lines, including visual layout assertions.
 
@@ -224,7 +224,7 @@ git commit -m "feat: redesign LidMute Aurora app icon"
 
 Run: `bash Scripts/check-visual-principles.sh`
 
-Run: `swift run --disable-sandbox --scratch-path /tmp/lidmute-test-build LidMuteCoreBehaviorTests`
+Run: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-clang-cache SWIFTPM_CACHE_PATH=/tmp/lidmute-swiftpm-cache swift run --disable-sandbox --scratch-path /tmp/lidmute-test-build --triple arm64-apple-macosx26.0 LidMuteCoreBehaviorTests`
 
 Expected: both exit 0.
 
