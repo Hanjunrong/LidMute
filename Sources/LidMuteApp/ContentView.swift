@@ -58,6 +58,11 @@ struct ContentView: View {
 private struct HeaderBar: View {
     @ObservedObject var model: AppViewModel
     @State private var showChromeGuide = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         HStack(spacing: 13) {
@@ -75,7 +80,7 @@ private struct HeaderBar: View {
                     .font(.system(size: 25, weight: .heavy, design: .rounded))
                 Text("合盖监控系统外放守卫")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
             }
 
             Spacer()
@@ -89,12 +94,12 @@ private struct HeaderBar: View {
                         .frame(width: 7, height: 7)
                     Text(model.chromeBridgeStatus)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondaryText)
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 11)
                 .padding(.vertical, 7)
-                .background(.white.opacity(0.09), in: Capsule())
+                .background(palette.controlFill, in: Capsule())
             }
             .buttonStyle(.plain)
             .popover(isPresented: $showChromeGuide) {
@@ -118,13 +123,18 @@ private struct HeaderBar: View {
 
 private struct GuardHero: View {
     @ObservedObject var model: AppViewModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         HStack(spacing: 24) {
             VStack(alignment: .leading, spacing: 9) {
                 Label(model.isEnabled ? "守卫已开启" : "守卫未开启", systemImage: model.isEnabled ? "shield.fill" : "shield.slash")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(model.isEnabled ? AmberVisualTheme.amber : .secondary)
+                    .foregroundStyle(model.isEnabled ? AmberVisualTheme.amber : palette.secondaryText)
 
                 Text(heroTitle)
                     .font(.system(size: 28, weight: .bold, design: .rounded))
@@ -132,7 +142,7 @@ private struct GuardHero: View {
 
                 Text(heroSubtitle)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
 
                 HStack(spacing: 8) {
                     MetricPill(
@@ -195,16 +205,21 @@ private struct MetricPill: View {
     var body: some View {
         Label(title, systemImage: systemImage)
             .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(tint)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(tint.opacity(0.09), in: Capsule())
-            .overlay(Capsule().stroke(tint.opacity(0.20), lineWidth: 0.8))
+            .background(tint.opacity(0.16), in: Capsule())
+            .overlay(Capsule().stroke(tint.opacity(0.35), lineWidth: 0.8))
     }
 }
 
 private struct AutomationCard: View {
     @ObservedObject var model: AppViewModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
@@ -241,29 +256,29 @@ private struct AutomationCard: View {
                     .font(.body.monospacedDigit().weight(.semibold))
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
-                    .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(.white.opacity(0.18)))
+                    .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(palette.border))
                     .onChange(of: model.nightStartText) { _, _ in model.nightScheduleTextChanged() }
                     .disabled(!model.isEnabled)
 
                 Image(systemName: "arrow.right")
                     .font(.caption.weight(.bold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
 
                 TextField("08:00", text: $model.nightEndText)
                     .textFieldStyle(.plain)
                     .font(.body.monospacedDigit().weight(.semibold))
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
-                    .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(.white.opacity(0.18)))
+                    .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(palette.border))
                     .onChange(of: model.nightEndText) { _, _ in model.nightScheduleTextChanged() }
                     .disabled(!model.isEnabled)
             }
 
             Text("\(model.nightScheduleStatus) · \(model.isDisplaySleeping ? "当前息屏" : "当前亮屏")")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.secondaryText)
                 .lineLimit(1)
 
         }
@@ -340,6 +355,11 @@ private struct SimulationCard: View {
 
 private struct NowPlayingCard: View {
     @ObservedObject var model: AppViewModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -354,7 +374,7 @@ private struct NowPlayingCard: View {
             if model.currentAudioProcesses.isEmpty {
                 Label("当前没有活动音频", systemImage: "speaker.slash")
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
@@ -396,7 +416,7 @@ private struct NowPlayingCard: View {
 
             Text(model.mediaStatus)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.tertiaryText)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .lineLimit(1)
 
@@ -410,6 +430,11 @@ private struct NowPlayingCard: View {
 
 private struct AudioProcessRow: View {
     let process: AudioProcess
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -428,14 +453,14 @@ private struct AudioProcessRow: View {
                     .lineLimit(1)
                 Text(process.bundleID ?? process.executablePath ?? "PID \(process.pid)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
                     .lineLimit(1)
             }
 
             Spacer()
             Text("\(process.pid)")
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.tertiaryText)
         }
     }
 }
@@ -444,6 +469,11 @@ private struct CardTitle: View {
     let title: String
     let subtitle: String
     let systemImage: String
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         HStack(spacing: 9) {
@@ -455,7 +485,7 @@ private struct CardTitle: View {
                     .font(.headline)
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
             }
         }
     }
@@ -464,6 +494,11 @@ private struct CardTitle: View {
 private struct ActivityTimeline: View {
     @ObservedObject var model: AppViewModel
     let viewportHeight: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     private let rowHeight = CGFloat(VisualLayoutMetrics.timelineRowHeight)
 
@@ -474,7 +509,7 @@ private struct ActivityTimeline: View {
                 Spacer()
                 Text("\(model.events.count) 条")
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
                 Button {
                     model.clearLog()
                 } label: {
@@ -523,6 +558,11 @@ private struct EventTimelineRow: View {
     let event: LidMuteEvent
     let rowHeight: CGFloat
     let showsDivider: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         let presentation = EventPresentation(kind: event.kind)
@@ -541,7 +581,7 @@ private struct EventTimelineRow: View {
                     .font(.subheadline.weight(.semibold))
                 Text(event.detail)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryText)
                     .lineLimit(1)
                 if let tab = event.chromeTab {
                     Text("\(tab.title) · \(tab.url)")
@@ -554,14 +594,14 @@ private struct EventTimelineRow: View {
             Spacer(minLength: 8)
             Text(event.timestamp, style: .time)
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.tertiaryText)
         }
         .padding(.vertical, 8)
         .frame(height: rowHeight, alignment: .top)
         .overlay(alignment: .bottom) {
             if showsDivider {
                 Rectangle()
-                    .fill(.white.opacity(0.22))
+                    .fill(palette.border)
                     .frame(height: 1)
                     .padding(.leading, 46)
             }
@@ -585,6 +625,11 @@ private struct EventTimelineRow: View {
 private struct ChromeGuideView: View {
     @ObservedObject var model: AppViewModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -614,7 +659,7 @@ private struct ChromeGuideView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("扩展 ID")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondaryText)
 
                     HStack(spacing: 8) {
                         TextField("粘贴 chrome://extensions 中显示的 ID", text: $model.chromeExtensionId)
@@ -622,8 +667,8 @@ private struct ChromeGuideView: View {
                             .font(.body.monospacedDigit())
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
-                            .background(.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.15)))
+                            .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.border))
 
                         Button {
                             model.registerChromeHost(extensionId: model.chromeExtensionId)
@@ -640,11 +685,11 @@ private struct ChromeGuideView: View {
                     if !model.chromeRegistrationStatus.isEmpty {
                         Label(model.chromeRegistrationStatus, systemImage: model.chromeRegistrationStatus.contains("失败") ? "exclamationmark.triangle" : "info.circle")
                             .font(.caption)
-                            .foregroundStyle(model.chromeRegistrationStatus.contains("失败") ? AmberVisualTheme.danger : .secondary)
+                            .foregroundStyle(model.chromeRegistrationStatus.contains("失败") ? AmberVisualTheme.danger : palette.secondaryText)
                     }
                 }
                 .padding(10)
-                .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+                .background(palette.surfaceTertiary, in: RoundedRectangle(cornerRadius: 10))
 
                 Divider().opacity(0.3)
             }
@@ -695,6 +740,11 @@ private struct GuideStep: View {
     let number: String
     let title: String
     let detail: [String]
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -716,7 +766,7 @@ private struct GuideStep: View {
                 ForEach(Array(detail.enumerated()), id: \.offset) { _, line in
                     Text("• \(line)")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondaryText)
                 }
             }
             .padding(.leading, 30)

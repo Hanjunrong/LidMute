@@ -39,6 +39,9 @@ stale_source="$(find "$root/Sources" -type f -newer "$binary" -print -quit)"
   exit 67
 }
 
+if [[ -e "$app" ]]; then
+  rm -rf "$app"
+fi
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/LidMute"
 cp "$host" "$app/Contents/MacOS/LidMuteNativeHost"
@@ -77,5 +80,7 @@ cat > "$app/Contents/Info.plist" <<'EOF'
 </dict>
 </plist>
 EOF
+
+codesign --force --deep --sign - "$app"
 
 print "Created $app"

@@ -11,6 +11,11 @@ struct LiquidGlassButtonStyle: ButtonStyle {
     var shape: LiquidGlassButtonShape = .capsule
 
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     @ViewBuilder
     func makeBody(configuration: Configuration) -> some View {
@@ -39,12 +44,12 @@ struct LiquidGlassButtonStyle: ButtonStyle {
         switch shape {
         case .capsule:
             label(configuration)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().stroke(tint.opacity(isEmphasized ? 0.62 : 0.26), lineWidth: 1))
+                .background(palette.controlFill, in: Capsule())
+                .overlay(Capsule().stroke(tint.opacity(isEmphasized ? 0.72 : 0.36), lineWidth: 1))
         case .roundedRectangle:
             label(configuration)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(tint.opacity(isEmphasized ? 0.62 : 0.26), lineWidth: 1))
+                .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(tint.opacity(isEmphasized ? 0.72 : 0.36), lineWidth: 1))
         }
     }
 
@@ -56,12 +61,12 @@ struct LiquidGlassButtonStyle: ButtonStyle {
     private func label(_ configuration: Configuration) -> some View {
         configuration.label
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(isEnabled ? .primary : .secondary)
+            .foregroundStyle(isEnabled ? palette.primaryText : palette.secondaryText)
             .padding(.horizontal, 15)
             .padding(.vertical, 9)
             .contentShape(Rectangle())
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
-            .opacity(isEnabled ? 1 : 0.58)
+            .opacity(isEnabled ? 1 : 0.76)
             .animation(.easeOut(duration: 0.16), value: configuration.isPressed)
     }
 }
@@ -72,6 +77,11 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
     var size: CGFloat = 40
 
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var palette: AmberThemePalette {
+        AmberVisualTheme.palette(for: colorScheme)
+    }
 
     @ViewBuilder
     func makeBody(configuration: Configuration) -> some View {
@@ -79,13 +89,13 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
             configuration.label
                 .frame(width: size, height: size)
                 .glassEffect(.regular.tint(tint.opacity(isEmphasized ? 0.55 : 0.28)).interactive(), in: .circle)
-                .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled))
+                .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled, palette: palette))
         } else {
             configuration.label
                 .frame(width: size, height: size)
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay(Circle().stroke(tint.opacity(isEmphasized ? 0.62 : 0.26), lineWidth: 1))
-                .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled))
+                .background(palette.controlFill, in: Circle())
+                .overlay(Circle().stroke(tint.opacity(isEmphasized ? 0.72 : 0.36), lineWidth: 1))
+                .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled, palette: palette))
         }
     }
 }
@@ -93,12 +103,13 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
 private struct IconInteractionModifier: ViewModifier {
     let isPressed: Bool
     let isEnabled: Bool
+    let palette: AmberThemePalette
 
     func body(content: Content) -> some View {
         content
-            .foregroundStyle(isEnabled ? .primary : .secondary)
+            .foregroundStyle(isEnabled ? palette.primaryText : palette.secondaryText)
             .scaleEffect(isPressed ? 0.94 : 1)
-            .opacity(isEnabled ? 1 : 0.58)
+            .opacity(isEnabled ? 1 : 0.76)
             .animation(.easeOut(duration: 0.16), value: isPressed)
     }
 }

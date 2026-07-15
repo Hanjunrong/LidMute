@@ -30,4 +30,19 @@ fi
 grep -q "TightCardDeck" "$theme_file" \
     || fail "Card decks must provide a continuous backing so rounded adjacent cards have no visible cracks"
 
+for token in surfacePrimary surfaceSecondary surfaceTertiary primaryText secondaryText border; do
+    grep -q "$token" "$theme_file" \
+        || fail "Adaptive theme must define semantic token: $token"
+done
+
+grep -q "AmberVisualTheme.palette" "$content_view" \
+    || fail "ContentView must consume the adaptive semantic theme palette"
+
+grep -q "AmberVisualTheme.palette" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift" \
+    || fail "LiquidGlassControls must consume the adaptive semantic theme palette"
+
+if grep -R -qF '.background(.white.opacity(' "$content_view" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift"; then
+    fail "Dashboard surfaces must use adaptive theme tokens instead of fixed white opacity"
+fi
+
 echo "PASS visual principle source checks"
