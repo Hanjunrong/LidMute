@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 content_view="$repo_root/Sources/LidMuteApp/ContentView.swift"
 theme_file="$repo_root/Sources/LidMuteApp/AmberVisualTheme.swift"
+controls_file="$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift"
 
 fail() {
     echo "FAIL visual principle: $*" >&2
@@ -55,6 +56,12 @@ done
 grep -q "AmberVisualTheme.palette" "$content_view" \
     || fail "ContentView must consume the adaptive semantic theme palette"
 
+grep -q "enum ControlCenterTypography" "$theme_file" \
+    || fail "Control Center Glass must centralize the system typography hierarchy"
+
+grep -q "ControlCenterTypography.heroTitle" "$content_view" \
+    || fail "Hero typography must consume the shared Control Center title token"
+
 for role in hero standard media timeline; do
     grep -q "amberGlassCard(role: \.$role" "$content_view" \
         || fail "ContentView must assign the Aurora card role: $role"
@@ -70,9 +77,15 @@ fi
 grep -q "AmberVisualTheme.palette" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift" \
     || fail "LiquidGlassControls must consume the adaptive semantic theme palette"
 
-controls_file="$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift"
 grep -q "struct AuroraControlChrome" "$controls_file" \
     || fail "Liquid Glass controls must share Aurora optical chrome"
+
+grep -qF '.spring(response: 0.30, dampingFraction: 1.0)' "$controls_file" \
+    || fail "Control Center buttons must return with a critically damped spring"
+
+reduce_motion_count="$(grep -oF 'accessibilityReduceMotion' "$controls_file" | wc -l | tr -d ' ')"
+[[ "$reduce_motion_count" -ge 2 ]] \
+    || fail "Shared button styles must honor Reduce Motion"
 
 interactive_count="$(grep -oF '.interactive()' "$controls_file" | wc -l | tr -d ' ')"
 [[ "$interactive_count" -ge 2 ]] \

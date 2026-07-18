@@ -12,6 +12,7 @@ struct LiquidGlassButtonStyle: ButtonStyle {
 
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var palette: AmberThemePalette {
         AmberVisualTheme.palette(for: colorScheme)
@@ -92,14 +93,14 @@ struct LiquidGlassButtonStyle: ButtonStyle {
 
     private func label(_ configuration: Configuration) -> some View {
         configuration.label
-            .font(.subheadline.weight(.semibold))
+            .font(ControlCenterTypography.button)
             .foregroundStyle(isEnabled ? palette.primaryText : palette.secondaryText)
             .padding(.horizontal, 15)
             .padding(.vertical, 9)
             .contentShape(Rectangle())
-            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .scaleEffect(reduceMotion ? 1 : (configuration.isPressed ? 0.97 : 1))
             .opacity(isEnabled ? 1 : 0.76)
-            .animation(.easeOut(duration: 0.16), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : .spring(response: 0.30, dampingFraction: 1.0), value: configuration.isPressed)
     }
 }
 
@@ -110,6 +111,7 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
 
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var palette: AmberThemePalette {
         AmberVisualTheme.palette(for: colorScheme)
@@ -130,7 +132,14 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
                     )
                 )
                 .glassEffect(.regular.tint(tint.opacity(isEmphasized ? 0.55 : 0.28)).interactive(), in: .circle)
-                .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled, palette: palette))
+                .modifier(
+                    IconInteractionModifier(
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled,
+                        reduceMotion: reduceMotion,
+                        palette: palette
+                    )
+                )
         } else {
             configuration.label
                 .frame(width: size, height: size)
@@ -143,7 +152,14 @@ struct LiquidGlassIconButtonStyle: ButtonStyle {
                         isEnabled: isEnabled
                     )
                 )
-                .modifier(IconInteractionModifier(isPressed: configuration.isPressed, isEnabled: isEnabled, palette: palette))
+                .modifier(
+                    IconInteractionModifier(
+                        isPressed: configuration.isPressed,
+                        isEnabled: isEnabled,
+                        reduceMotion: reduceMotion,
+                        palette: palette
+                    )
+                )
         }
     }
 }
@@ -210,13 +226,14 @@ private struct AuroraControlChrome: ViewModifier {
 private struct IconInteractionModifier: ViewModifier {
     let isPressed: Bool
     let isEnabled: Bool
+    let reduceMotion: Bool
     let palette: AmberThemePalette
 
     func body(content: Content) -> some View {
         content
             .foregroundStyle(isEnabled ? palette.primaryText : palette.secondaryText)
-            .scaleEffect(isPressed ? 0.94 : 1)
+            .scaleEffect(reduceMotion ? 1 : (isPressed ? 0.94 : 1))
             .opacity(isEnabled ? 1 : 0.76)
-            .animation(.easeOut(duration: 0.16), value: isPressed)
+            .animation(reduceMotion ? nil : .spring(response: 0.30, dampingFraction: 1.0), value: isPressed)
     }
 }
