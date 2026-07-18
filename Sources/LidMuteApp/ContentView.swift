@@ -294,6 +294,21 @@ private struct AutomationCard: View {
     }
 }
 
+private struct SimulationActionLabel: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+            Text(title)
+                .font(ControlCenterTypography.compactCaption)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+}
+
 private struct SimulationCard: View {
     @ObservedObject var model: AppViewModel
 
@@ -312,8 +327,8 @@ private struct SimulationCard: View {
                 Button {
                     model.simulateLidClosed()
                 } label: {
-                    Label(
-                        "模拟合盖",
+                    SimulationActionLabel(
+                        title: "模拟合盖",
                         systemImage: model.simulatedLidState == .closed ? "checkmark.circle.fill" : "laptopcomputer"
                     )
                 }
@@ -330,8 +345,8 @@ private struct SimulationCard: View {
                 Button {
                     model.simulateLidOpened()
                 } label: {
-                    Label(
-                        "模拟开盖",
+                    SimulationActionLabel(
+                        title: "模拟开盖",
                         systemImage: model.simulatedLidState == .opened ? "checkmark.circle.fill" : "laptopcomputer.and.arrow.up"
                     )
                 }

@@ -62,6 +62,14 @@ grep -q "enum ControlCenterTypography" "$theme_file" \
 grep -q "ControlCenterTypography.heroTitle" "$content_view" \
     || fail "Hero typography must consume the shared Control Center title token"
 
+grep -q "struct SimulationActionLabel" "$content_view" \
+    || fail "Simulation controls must use a dedicated compact action label"
+
+grep -qF '.font(ControlCenterTypography.compactCaption)' "$content_view" \
+    && grep -qF '.lineLimit(1)' "$content_view" \
+    && grep -qF '.fixedSize(horizontal: true, vertical: false)' "$content_view" \
+    || fail "Simulation action labels must remain compact, single-line, and non-truncating"
+
 for role in hero standard media timeline; do
     grep -q "amberGlassCard(role: \.$role" "$content_view" \
         || fail "ContentView must assign the Aurora card role: $role"
