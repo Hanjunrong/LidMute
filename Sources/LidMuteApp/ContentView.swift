@@ -76,9 +76,10 @@ private struct HeaderBar: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text("LidMute")
-                    .font(.system(size: 25, weight: .heavy, design: .rounded))
+                    .font(ControlCenterTypography.brand)
+                    .tracking(-0.35)
                 Text("合盖监控系统外放守卫")
-                    .font(.caption)
+                    .font(ControlCenterTypography.caption)
                     .foregroundStyle(palette.secondaryText)
             }
 
@@ -92,7 +93,7 @@ private struct HeaderBar: View {
                         .fill(chromeDotColor)
                         .frame(width: 7, height: 7)
                     Text(model.chromeBridgeStatus)
-                        .font(.caption)
+                        .font(ControlCenterTypography.caption)
                         .foregroundStyle(palette.secondaryText)
                         .lineLimit(1)
                 }
@@ -132,15 +133,15 @@ private struct GuardHero: View {
         HStack(spacing: 24) {
             VStack(alignment: .leading, spacing: 9) {
                 Label(model.isEnabled ? "守卫已开启" : "守卫未开启", systemImage: model.isEnabled ? "shield.fill" : "shield.slash")
-                    .font(.caption.weight(.bold))
+                    .font(ControlCenterTypography.heroEyebrow)
                     .foregroundStyle(model.isEnabled ? AmberVisualTheme.amber : palette.secondaryText)
 
                 Text(heroTitle)
-                    .font(.system(size: 28, weight: .bold, design: .rounded))
-                    .tracking(-0.4)
+                    .font(ControlCenterTypography.heroTitle)
+                    .tracking(-0.65)
 
                 Text(heroSubtitle)
-                    .font(.subheadline)
+                    .font(ControlCenterTypography.body)
                     .foregroundStyle(palette.secondaryText)
 
                 HStack(spacing: 8) {
@@ -203,7 +204,7 @@ private struct MetricPill: View {
 
     var body: some View {
         Label(title, systemImage: systemImage)
-            .font(.caption.weight(.medium))
+            .font(ControlCenterTypography.compactCaption)
             .foregroundStyle(tint)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
@@ -257,7 +258,7 @@ private struct AutomationCard: View {
             HStack(spacing: 9) {
                 TextField("00:00", text: $model.nightStartText)
                     .textFieldStyle(.plain)
-                    .font(.body.monospacedDigit().weight(.semibold))
+                    .font(ControlCenterTypography.numeric)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
                     .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
@@ -266,12 +267,12 @@ private struct AutomationCard: View {
                     .disabled(!model.isEnabled)
 
                 Image(systemName: "arrow.right")
-                    .font(.caption.weight(.bold))
+                    .font(ControlCenterTypography.caption)
                     .foregroundStyle(palette.secondaryText)
 
                 TextField("08:00", text: $model.nightEndText)
                     .textFieldStyle(.plain)
-                    .font(.body.monospacedDigit().weight(.semibold))
+                    .font(ControlCenterTypography.numeric)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
                     .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
@@ -281,7 +282,7 @@ private struct AutomationCard: View {
             }
 
             Text("\(model.nightScheduleStatus) · \(model.isDisplaySleeping ? "当前息屏" : "当前亮屏")")
-                .font(.caption)
+                .font(ControlCenterTypography.caption)
                 .foregroundStyle(palette.secondaryText)
                 .lineLimit(1)
 
@@ -290,6 +291,21 @@ private struct AutomationCard: View {
         .opacity(model.isEnabled ? 1 : 0.62)
         .padding(10)
         .amberGlassCard(role: .standard, padding: 0, cornerRadius: 14)
+    }
+}
+
+private struct SimulationActionLabel: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+            Text(title)
+                .font(ControlCenterTypography.compactCaption)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
     }
 }
 
@@ -311,8 +327,8 @@ private struct SimulationCard: View {
                 Button {
                     model.simulateLidClosed()
                 } label: {
-                    Label(
-                        "模拟合盖",
+                    SimulationActionLabel(
+                        title: "模拟合盖",
                         systemImage: model.simulatedLidState == .closed ? "checkmark.circle.fill" : "laptopcomputer"
                     )
                 }
@@ -329,8 +345,8 @@ private struct SimulationCard: View {
                 Button {
                     model.simulateLidOpened()
                 } label: {
-                    Label(
-                        "模拟开盖",
+                    SimulationActionLabel(
+                        title: "模拟开盖",
                         systemImage: model.simulatedLidState == .opened ? "checkmark.circle.fill" : "laptopcomputer.and.arrow.up"
                     )
                 }
@@ -387,7 +403,7 @@ private struct NowPlayingCard: View {
 
             if model.currentAudioProcesses.isEmpty {
                 Label("当前没有活动音频", systemImage: "speaker.slash")
-                    .font(.subheadline)
+                    .font(ControlCenterTypography.body)
                     .foregroundStyle(palette.secondaryText)
             } else {
                 ScrollView {
@@ -429,7 +445,7 @@ private struct NowPlayingCard: View {
             }
 
             Text(model.mediaStatus)
-                .font(.caption2)
+                .font(ControlCenterTypography.compactCaption)
                 .foregroundStyle(palette.tertiaryText)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .lineLimit(1)
@@ -462,17 +478,17 @@ private struct AudioProcessRow: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(process.name)
-                    .font(.subheadline.weight(.semibold))
+                    .font(ControlCenterTypography.cardTitle)
                     .lineLimit(1)
                 Text(process.bundleID ?? process.executablePath ?? "PID \(process.pid)")
-                    .font(.caption)
+                    .font(ControlCenterTypography.caption)
                     .foregroundStyle(palette.secondaryText)
                     .lineLimit(1)
             }
 
             Spacer()
             Text("\(process.pid)")
-                .font(.caption.monospacedDigit())
+                .font(ControlCenterTypography.numericCaption)
                 .foregroundStyle(palette.tertiaryText)
         }
     }
@@ -500,9 +516,10 @@ private struct CardTitle: View {
             )
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
-                    .font(.headline)
+                    .font(ControlCenterTypography.cardTitle)
+                    .tracking(-0.15)
                 Text(subtitle)
-                    .font(.caption)
+                    .font(ControlCenterTypography.caption)
                     .foregroundStyle(palette.secondaryText)
             }
         }
@@ -531,7 +548,7 @@ private struct ActivityTimeline: View {
                 )
                 Spacer()
                 Text("\(model.events.count) 条")
-                    .font(.caption.monospacedDigit())
+                    .font(ControlCenterTypography.numericCaption)
                     .foregroundStyle(palette.secondaryText)
                 Button {
                     model.clearLog()
@@ -600,14 +617,14 @@ private struct EventTimelineRow: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(presentation.title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(ControlCenterTypography.cardTitle)
                 Text(event.detail)
-                    .font(.caption)
+                    .font(ControlCenterTypography.caption)
                     .foregroundStyle(palette.secondaryText)
                     .lineLimit(1)
                 if let tab = event.chromeTab {
                     Text("\(tab.title) · \(tab.url)")
-                        .font(.caption2)
+                        .font(ControlCenterTypography.compactCaption)
                         .foregroundStyle(AmberVisualTheme.seaGlass)
                         .lineLimit(1)
                 }
@@ -615,7 +632,7 @@ private struct EventTimelineRow: View {
 
             Spacer(minLength: 8)
             Text(event.timestamp, style: .time)
-                .font(.caption.monospacedDigit())
+                .font(ControlCenterTypography.numericCaption)
                 .foregroundStyle(palette.tertiaryText)
         }
         .padding(.vertical, 8)
@@ -657,7 +674,7 @@ private struct ChromeGuideView: View {
         VStack(alignment: .leading, spacing: 16) {
             // Header
             Label("Chrome 扩展连接指南", systemImage: "antenna.radiowaves.left.and.right")
-                .font(.headline.weight(.bold))
+                .font(ControlCenterTypography.cardTitle)
                 .foregroundStyle(AmberVisualTheme.amber)
 
             Divider().opacity(0.3)
@@ -668,7 +685,7 @@ private struct ChromeGuideView: View {
                     .fill(statusDotColor)
                     .frame(width: 8, height: 8)
                 Text(model.chromeBridgeStatus)
-                    .font(.subheadline.weight(.medium))
+                    .font(ControlCenterTypography.body)
                 Spacer()
                 if model.chromeConnectionState == .connected || model.chromeConnectionState == .receivedEvent {
                     Image(systemName: "checkmark.circle.fill")
@@ -680,13 +697,13 @@ private struct ChromeGuideView: View {
             if model.chromeConnectionState != .connected && model.chromeConnectionState != .receivedEvent {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("扩展 ID")
-                        .font(.caption.weight(.semibold))
+                        .font(ControlCenterTypography.caption)
                         .foregroundStyle(palette.secondaryText)
 
                     HStack(spacing: 8) {
                         TextField("粘贴 chrome://extensions 中显示的 ID", text: $model.chromeExtensionId)
                             .textFieldStyle(.plain)
-                            .font(.body.monospacedDigit())
+                            .font(ControlCenterTypography.codeCaption)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
                             .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 8))
@@ -696,7 +713,7 @@ private struct ChromeGuideView: View {
                             model.registerChromeHost(extensionId: model.chromeExtensionId)
                         } label: {
                             Label("注册", systemImage: "key.fill")
-                                .font(.subheadline.weight(.semibold))
+                                .font(ControlCenterTypography.button)
                         }
                         .buttonStyle(
                             LiquidGlassButtonStyle(tint: AmberVisualTheme.seaGlass, isEmphasized: false, shape: .capsule)
@@ -706,7 +723,7 @@ private struct ChromeGuideView: View {
 
                     if !model.chromeRegistrationStatus.isEmpty {
                         Label(model.chromeRegistrationStatus, systemImage: model.chromeRegistrationStatus.contains("失败") ? "exclamationmark.triangle" : "info.circle")
-                            .font(.caption)
+                            .font(ControlCenterTypography.caption)
                             .foregroundStyle(model.chromeRegistrationStatus.contains("失败") ? AmberVisualTheme.danger : palette.secondaryText)
                     }
                 }
@@ -725,7 +742,7 @@ private struct ChromeGuideView: View {
                     "选择以下目录：",
                 ])
                 Text(model.chromeExtensionPath)
-                    .font(.caption.monospaced())
+                    .font(ControlCenterTypography.codeCaption)
                     .foregroundStyle(AmberVisualTheme.seaGlass)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -775,19 +792,19 @@ private struct GuideStep: View {
                     Circle()
                         .fill(AmberVisualTheme.amber.opacity(0.15))
                     Text(number)
-                        .font(.caption.weight(.bold))
+                        .font(ControlCenterTypography.compactCaption)
                         .foregroundStyle(AmberVisualTheme.amber)
                 }
                 .frame(width: 22, height: 22)
 
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
+                    .font(ControlCenterTypography.cardTitle)
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(Array(detail.enumerated()), id: \.offset) { _, line in
                     Text("• \(line)")
-                        .font(.caption)
+                        .font(ControlCenterTypography.caption)
                         .foregroundStyle(palette.secondaryText)
                 }
             }

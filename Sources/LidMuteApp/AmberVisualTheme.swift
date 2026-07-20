@@ -21,6 +21,20 @@ struct AmberThemePalette {
     let disabledFill: Color
 }
 
+enum ControlCenterTypography {
+    static let brand = Font.system(size: 24, weight: .semibold, design: .default)
+    static let heroEyebrow = Font.system(size: 12, weight: .semibold, design: .default)
+    static let heroTitle = Font.system(size: 30, weight: .bold, design: .default)
+    static let cardTitle = Font.system(size: 15, weight: .semibold, design: .default)
+    static let body = Font.system(size: 13, weight: .regular, design: .default)
+    static let caption = Font.system(size: 12, weight: .medium, design: .default)
+    static let compactCaption = Font.system(size: 11, weight: .medium, design: .default)
+    static let button = Font.system(size: 13, weight: .semibold, design: .default)
+    static let numeric = Font.system(size: 13, weight: .semibold, design: .monospaced)
+    static let numericCaption = Font.system(size: 12, weight: .medium, design: .monospaced)
+    static let codeCaption = Font.system(size: 12, weight: .medium, design: .monospaced)
+}
+
 enum AmberVisualTheme {
     static let amber = Color(red: 0.91, green: 0.47, blue: 0.17)
     static let amberSoft = Color(red: 0.96, green: 0.72, blue: 0.46)
@@ -88,26 +102,26 @@ enum AuroraCardRole {
         case .hero:
             colors = [
                 palette.surfacePrimary,
-                AmberVisualTheme.amberSoft.opacity(0.16),
-                AmberVisualTheme.seaGlass.opacity(0.12),
+                AmberVisualTheme.amberSoft.opacity(0.24),
+                AmberVisualTheme.seaGlass.opacity(0.15),
             ]
         case .standard:
             colors = [
                 palette.surfaceSecondary,
-                AmberVisualTheme.mistBlue.opacity(0.12),
-                AmberVisualTheme.amberSoft.opacity(0.08),
+                AmberVisualTheme.mistBlue.opacity(0.10),
+                AmberVisualTheme.amberSoft.opacity(0.06),
             ]
         case .media:
             colors = [
-                palette.surfaceSecondary,
-                AmberVisualTheme.seaGlass.opacity(0.18),
-                AmberVisualTheme.mistBlue.opacity(0.11),
+                palette.surfacePrimary.opacity(0.88),
+                AmberVisualTheme.seaGlass.opacity(0.24),
+                AmberVisualTheme.mistBlue.opacity(0.14),
             ]
         case .timeline:
             colors = [
                 palette.surfaceTertiary,
-                AmberVisualTheme.mistBlue.opacity(0.08),
-                AmberVisualTheme.seaGlass.opacity(0.07),
+                palette.surfaceSecondary.opacity(0.82),
+                AmberVisualTheme.mistBlue.opacity(0.04),
             ]
         }
 
@@ -117,13 +131,13 @@ enum AuroraCardRole {
     func glassTint(palette: AmberThemePalette) -> Color {
         switch self {
         case .hero:
-            return AmberVisualTheme.amberSoft.opacity(0.22)
+            return AmberVisualTheme.amberSoft.opacity(0.34)
         case .standard:
-            return palette.surfacePrimary.opacity(0.34)
+            return palette.surfacePrimary.opacity(0.24)
         case .media:
-            return AmberVisualTheme.seaGlass.opacity(0.20)
+            return AmberVisualTheme.seaGlass.opacity(0.30)
         case .timeline:
-            return AmberVisualTheme.mistBlue.opacity(0.12)
+            return AmberVisualTheme.mistBlue.opacity(0.07)
         }
     }
 
@@ -142,19 +156,30 @@ enum AuroraCardRole {
 
     var shadowRadius: CGFloat {
         switch self {
-        case .hero: 18
-        case .media: 15
+        case .hero: 24
+        case .media: 19
         case .standard: 12
-        case .timeline: 10
+        case .timeline: 6
         }
     }
 
     var shadowY: CGFloat {
         switch self {
-        case .hero: 9
-        case .media: 7
+        case .hero: 12
+        case .media: 9
         case .standard: 6
-        case .timeline: 4
+        case .timeline: 2
+        }
+    }
+
+    func opaqueSurface(palette: AmberThemePalette) -> Color {
+        switch self {
+        case .hero, .media:
+            return palette.surfacePrimary.opacity(0.96)
+        case .standard:
+            return palette.surfaceSecondary.opacity(0.96)
+        case .timeline:
+            return palette.surfaceTertiary.opacity(0.98)
         }
     }
 }
@@ -361,13 +386,20 @@ private struct AmberGlassCardModifier: ViewModifier {
     let padding: CGFloat
     let cornerRadius: CGFloat
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     @ViewBuilder
     func body(content: Content) -> some View {
         let palette = AmberVisualTheme.palette(for: colorScheme)
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
-        if #available(macOS 26.0, *) {
+        if reduceTransparency {
+            content
+                .padding(padding)
+                .background(role.opaqueSurface(palette: palette), in: shape)
+                .overlay(shape.stroke(palette.border, lineWidth: 1.15))
+                .shadow(color: palette.cardShadow, radius: role.shadowRadius * 0.55, y: role.shadowY * 0.5)
+        } else if #available(macOS 26.0, *) {
             content
                 .padding(padding)
                 .background(role.gradient(palette: palette), in: shape)
