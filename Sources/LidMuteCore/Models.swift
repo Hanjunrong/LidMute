@@ -188,16 +188,58 @@ public protocol EventStoring: AnyObject, Sendable {
     func clear() throws
 }
 
-public protocol AudioControlling: AnyObject, Sendable {
-    func resolveBuiltInSpeaker(uid: String?) throws -> AudioDevice?
-    func captureState(of device: AudioDevice) throws -> AudioDeviceState
-    func enforceSilence(on device: AudioDevice) throws
-    func restore(_ state: AudioDeviceState, on device: AudioDevice) throws
+public protocol AudioProcessEvidenceProviding: AnyObject, Sendable {
     func activeOutputProcesses() throws -> [AudioProcess]
 }
 
-public extension AudioControlling {
-    func builtInSpeaker() throws -> AudioDevice? {
-        try resolveBuiltInSpeaker(uid: nil)
-    }
+public protocol AudioControlling: AudioProcessEvidenceProviding {
+    func resolveBuiltInSpeaker(uid: String?) throws -> AudioDevice?
+    func captureState(of device: AudioDevice) throws -> AudioDeviceState
+    func writeMuted(_ muted: Bool, on device: AudioDevice) throws
+    func writeVolume(_ volume: Float, on device: AudioDevice) throws
+    func readState(of device: AudioDevice) throws -> AudioDeviceState
+    func supportsWritableMute(on device: AudioDevice) -> Bool
+}
+
+public enum SpeakerProtectionAction: Equatable, Sendable {
+    case begin(sources: Set<ProtectionSource>)
+    case reinforce
+    case end
+    case routeChangedWhileProtectionRequired(sources: Set<ProtectionSource>)
+}
+
+public enum SpeakerRecoveryOutcome: Equatable, Sendable {
+    case noPendingRecovery
+    case restored
+    case waitingForMatchingDevice
+    case corruptSnapshot
+    case unsupportedSnapshot(Int)
+    case failedButVerifiedSilent
+    case failedSafetyUnknown
+}
+
+public enum AppLifecycleState: Equatable, Sendable {
+    case recovering
+    case ready
+    case recoveryBlocked(SpeakerRecoveryOutcome)
+}
+
+public enum ShutdownOutcome: Equatable, Sendable {
+    case restored
+    case verifiedSilent
+    case safetyUnknown
+    case timedOut
+}
+
+public enum TerminationDecision: Equatable, Sendable {
+    case allow
+    case cancel
+}
+
+public protocol SpeakerProtectionApplying: Sendable {
+    func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome
+}
+
+public protocol PendingSpeakerRecovering: Sendable {
+    func recoverPending() async -> SpeakerRecoveryOutcome
 }

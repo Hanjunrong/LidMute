@@ -1,14 +1,32 @@
 import AppKit
+import LidMuteCore
 import SwiftUI
 
 @MainActor
 final class LidMuteAppDelegate: NSObject, NSApplicationDelegate {
     let model = AppViewModel()
     private let presentationController = ApplicationPresentationController()
+    private lazy var terminationCoordinator = ApplicationTerminationCoordinator(
+        shutdown: model,
+        timeout: .seconds(5)
+    )
+    private var terminationReplyTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        model.start()
+        Task { await model.start() }
         presentationController.applyLightweightMode(model.isLightweightModeEnabled)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if terminationReplyTask == nil {
+            terminationReplyTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let decision = await terminationCoordinator.requestTermination()
+                NSApp.reply(toApplicationShouldTerminate: decision == .allow)
+                terminationReplyTask = nil
+            }
+        }
+        return .terminateLater
     }
 
     func setLightweightModeEnabled(_ enabled: Bool) {
@@ -53,6 +71,7 @@ private struct MenuBarMenu: View {
         Button(model.isEnabled ? "关闭守卫" : "开启守卫") {
             model.setEnabled(!model.isEnabled)
         }
+        .disabled(!model.canToggleGuard)
         Toggle(
             "轻量模式",
             isOn: Binding(

@@ -16,7 +16,7 @@ enum ChromeConnectionState: Equatable {
 }
 
 @MainActor
-final class AppViewModel: ObservableObject {
+final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationShuttingDown {
     @Published var isEnabled = false
     @Published var isLightweightModeEnabled = false
     @Published private(set) var statusText = "守卫未开启"
@@ -36,8 +36,20 @@ final class AppViewModel: ObservableObject {
     @Published var chromeExtensionId = ""
     @Published private(set) var chromeRegistrationStatus = ""
     @Published private(set) var chromeExtensionPath = ""
+    @Published private(set) var lifecycleState: AppLifecycleState = .recovering
+
+    var canToggleGuard: Bool { lifecycleState == .ready }
 
     private let coordinator: ProtectionCoordinator
+    private let audioController: SystemAudioController
+    private let recoveryRuntime: SpeakerRecoveryRuntime
+    private lazy var lifecycleCoordinator = ApplicationLifecycleCoordinator(
+        recovery: recoveryRuntime,
+        monitors: self
+    )
+    private lazy var routeMonitor = SystemAudioRouteMonitor { [weak self] in
+        self?.receiveAudioRouteChanged()
+    }
     private lazy var simulationProtectionLifecycle = SimulationProtectionLifecycle(coordinator: coordinator)
     private let store: JSONLineEventStore
     private let applicationSupport: URL
@@ -56,6 +68,8 @@ final class AppViewModel: ObservableObject {
     private let nightPreferences = NightProtectionPreferences()
     private var effectiveNightSchedule = NightSchedule(startMinutes: 0, endMinutes: 8 * 60)
     private var hasStarted = false
+    private var isShuttingDown = false
+    private var routeChangeTask: Task<Void, Never>?
 
     init() {
         self.applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -63,7 +77,22 @@ final class AppViewModel: ObservableObject {
         store = JSONLineEventStore(url: applicationSupport.appending(path: "events.jsonl"))
         inboxURL = applicationSupport.appending(path: "chrome-inbox.jsonl")
         chromeDeduplicator = ChromeEventDeduplicator(url: applicationSupport.appending(path: "chrome-seen-event-ids.json"))
-        coordinator = ProtectionCoordinator(audio: SystemAudioController(), store: store)
+        let audioController = SystemAudioController()
+        let recoveryStore = FileSpeakerRecoveryStore(
+            url: applicationSupport.appending(path: "speaker-recovery.json")
+        )
+        let recoveryRuntime = SpeakerRecoveryRuntime(
+            audio: audioController,
+            recoveryStore: recoveryStore,
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+        )
+        self.audioController = audioController
+        self.recoveryRuntime = recoveryRuntime
+        coordinator = ProtectionCoordinator(
+            protection: recoveryRuntime,
+            processEvidence: audioController,
+            store: store
+        )
         let nightConfiguration = nightPreferences.load()
         nightScheduleEnabled = nightConfiguration.enabled
         nightStartText = nightConfiguration.startText
@@ -78,9 +107,18 @@ final class AppViewModel: ObservableObject {
         checkChromeConnection()
     }
 
-    func start() {
+    func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        await lifecycleCoordinator.start()
+        lifecycleState = lifecycleCoordinator.state
+        refresh()
+    }
+
+    func startAll() throws {
+        guard !isShuttingDown else { return }
+        try routeMonitor.start()
+        lifecycleState = .ready
         if lidMonitor == nil {
             let monitor = SystemLidMonitor { [weak self] closed in self?.receiveSystemLidState(closed) }
             monitor.start()
@@ -94,10 +132,7 @@ final class AppViewModel: ObservableObject {
         if audioTimer == nil {
             audioTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    let controller = SystemAudioController()
-                    let processes = (try? controller.activeOutputProcesses()) ?? []
-                    self.updateAudioProcesses(processes)
+                    self?.pollAudioProcesses()
                 }
             }
         }
@@ -115,7 +150,42 @@ final class AppViewModel: ObservableObject {
         refreshNightProtection()
     }
 
+    func startRouteOnly() throws {
+        guard !isShuttingDown else { return }
+        try routeMonitor.start()
+    }
+
+    func stopAll() {
+        routeMonitor.stop()
+        lidMonitor?.stop()
+        lidMonitor = nil
+        displayMonitor?.stop()
+        displayMonitor = nil
+        audioTimer?.invalidate()
+        audioTimer = nil
+        inboxTimer?.invalidate()
+        inboxTimer = nil
+        nightTimer?.invalidate()
+        nightTimer = nil
+        routeChangeTask?.cancel()
+        routeChangeTask = nil
+    }
+
+    func shutdownAndRestore() async -> ShutdownOutcome {
+        guard !isShuttingDown else {
+            return mapShutdownOutcome(await recoveryRuntime.recoverPending())
+        }
+        isShuttingDown = true
+        lifecycleCoordinator.stop()
+        stopAll()
+        let outcome = await recoveryRuntime.recoverPending()
+        isEnabled = false
+        refresh()
+        return mapShutdownOutcome(outcome)
+    }
+
     func setEnabled(_ enabled: Bool) {
+        guard canToggleGuard, !isShuttingDown else { return }
         isEnabled = enabled
         coordinator.setEnabled(enabled)
         if !enabled {
@@ -129,17 +199,20 @@ final class AppViewModel: ObservableObject {
     }
 
     func receiveSystemLidState(_ closed: Bool) {
+        guard lifecycleState == .ready, !isShuttingDown else { return }
         latestSystemLidClosed = closed
         coordinator.receivePhysicalLid(closed: closed)
         refresh()
     }
 
     func receiveDisplaySleep(_ sleeping: Bool) {
+        guard lifecycleState == .ready, !isShuttingDown else { return }
         isDisplaySleeping = sleeping
         refreshNightProtection()
     }
 
     func simulateLidClosed() {
+        guard lifecycleState == .ready, !isShuttingDown else { return }
         guard simulatedLidState != .closed else { return }
         simulatedLidState = .closed
         simulationProtectionLifecycle.update(.closed)
@@ -147,6 +220,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func simulateLidOpened() {
+        guard lifecycleState == .ready, !isShuttingDown else { return }
         guard simulatedLidState != .opened else { return }
         simulatedLidState = .opened
         simulationProtectionLifecycle.update(.opened)
@@ -194,6 +268,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func drainChromeInbox() {
+        guard lifecycleState == .ready, !isShuttingDown else { return }
         guard let data = try? Data(contentsOf: inboxURL), data.count > inboxOffset else {
             checkChromeConnection()
             return
@@ -218,9 +293,12 @@ final class AppViewModel: ObservableObject {
     }
 
     private func pollAudioProcesses() {
-        let controller = SystemAudioController()
-        let processes = (try? controller.activeOutputProcesses()) ?? []
-        updateAudioProcesses(processes)
+        guard lifecycleState == .ready, !isShuttingDown else { return }
+        do {
+            updateAudioProcesses(try audioController.activeOutputProcesses())
+        } catch {
+            statusText = "无法读取音频进程：\(error.localizedDescription)"
+        }
     }
 
     private func updateAudioProcesses(_ processes: [AudioProcess]) {
@@ -242,6 +320,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func refreshNightProtection() {
+        guard lifecycleState == .ready, !isShuttingDown else { return }
         let validTime = NightProtectionPreferences.minutes(from: nightStartText) != nil &&
             NightProtectionPreferences.minutes(from: nightEndText) != nil
         nightScheduleStatus = validTime
@@ -406,11 +485,66 @@ final class AppViewModel: ObservableObject {
 
     private func refresh() {
         events = (try? store.load())?.reversed() ?? []
+        switch lifecycleState {
+        case .recovering:
+            statusText = "正在恢复内建扬声器安全状态"
+            return
+        case let .recoveryBlocked(outcome):
+            statusText = recoveryBlockedStatus(outcome)
+            return
+        case .ready:
+            break
+        }
         switch coordinator.state {
         case .inactive: statusText = "守卫未开启"
         case .armed: statusText = "已开启，等待合盖"
         case .protecting: statusText = "正在保护内建扬声器"
         case .unavailable: statusText = "未发现可控制的内建扬声器"
+        }
+    }
+
+    private func receiveAudioRouteChanged() {
+        guard !isShuttingDown, routeChangeTask == nil else { return }
+        routeChangeTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { routeChangeTask = nil }
+            await lifecycleCoordinator.receiveAudioRouteChanged()
+            lifecycleState = lifecycleCoordinator.state
+            guard lifecycleState == .ready, !isShuttingDown else {
+                refresh()
+                return
+            }
+            coordinator.receiveAudioRouteChanged()
+            refresh()
+        }
+    }
+
+    private func recoveryBlockedStatus(_ outcome: SpeakerRecoveryOutcome) -> String {
+        switch outcome {
+        case .waitingForMatchingDevice:
+            return "等待原内建扬声器重新出现"
+        case .corruptSnapshot:
+            return "扬声器恢复记录损坏，守卫已阻止启动"
+        case let .unsupportedSnapshot(version):
+            return "扬声器恢复记录版本不受支持（\(version)）"
+        case .failedButVerifiedSilent:
+            return "恢复失败，但已验证扬声器保持静音"
+        case .failedSafetyUnknown:
+            return "扬声器安全状态未知，守卫已阻止启动"
+        case .noPendingRecovery, .restored:
+            return "扬声器恢复已完成"
+        }
+    }
+
+    private func mapShutdownOutcome(_ outcome: SpeakerRecoveryOutcome) -> ShutdownOutcome {
+        switch outcome {
+        case .noPendingRecovery, .restored:
+            return .restored
+        case .failedButVerifiedSilent:
+            return .verifiedSilent
+        case .waitingForMatchingDevice, .corruptSnapshot,
+             .unsupportedSnapshot, .failedSafetyUnknown:
+            return .safetyUnknown
         }
     }
 }

@@ -13,6 +13,10 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
     }
 
     func captureState(of device: AudioDevice) throws -> AudioDeviceState {
+        try readState(of: device)
+    }
+
+    func readState(of device: AudioDevice) throws -> AudioDeviceState {
         let device = try revalidatedBuiltInSpeaker(device)
         let muteAddress = outputAddress(kAudioDevicePropertyMute)
         let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
@@ -25,37 +29,28 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         return AudioDeviceState(muted: muted, volume: volume, usedVolumeFallback: !hasWritableMute)
     }
 
-    func enforceSilence(on device: AudioDevice) throws {
+    func writeMuted(_ muted: Bool, on device: AudioDevice) throws {
         let device = try revalidatedBuiltInSpeaker(device)
         let muteAddress = outputAddress(kAudioDevicePropertyMute)
-        if hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
-            try writeUInt32(1, objectID: device.id, address: muteAddress)
-            return
+        guard hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) else {
+            throw SystemAudioError.noControllableOutput
         }
+        try writeUInt32(muted ? 1 : 0, objectID: device.id, address: muteAddress)
+    }
 
+    func writeVolume(_ volume: Float, on device: AudioDevice) throws {
+        let device = try revalidatedBuiltInSpeaker(device)
         let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
         guard hasProperty(device.id, volumeAddress), isSettable(device.id, volumeAddress) else {
             throw SystemAudioError.noControllableOutput
         }
-        try writeFloat(0, objectID: device.id, address: volumeAddress)
+        try writeFloat(volume, objectID: device.id, address: volumeAddress)
     }
 
-    func restore(_ state: AudioDeviceState, on device: AudioDevice) throws {
-        let device = try revalidatedBuiltInSpeaker(device)
+    func supportsWritableMute(on device: AudioDevice) -> Bool {
+        guard let device = try? revalidatedBuiltInSpeaker(device) else { return false }
         let muteAddress = outputAddress(kAudioDevicePropertyMute)
-        let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
-
-        // Keep the route silent before raising its volume on lid-open restoration.
-        if state.muted, hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
-            try writeUInt32(1, objectID: device.id, address: muteAddress)
-        }
-        if hasProperty(device.id, volumeAddress), isSettable(device.id, volumeAddress) {
-            try writeFloat(state.volume, objectID: device.id, address: volumeAddress)
-        }
-
-        if !state.muted, hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
-            try writeUInt32(state.muted ? 1 : 0, objectID: device.id, address: muteAddress)
-        }
+        return hasProperty(device.id, muteAddress) && isSettable(device.id, muteAddress)
     }
 
     func activeOutputProcesses() throws -> [AudioProcess] {
