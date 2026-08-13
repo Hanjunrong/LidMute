@@ -1,10 +1,10 @@
 import Foundation
-import Testing
+import XCTest
 @testable import LidMuteCore
 
-@Suite struct ExistingBehaviorTests {
+final class ExistingBehaviorTests: XCTestCase {
 
-    @Test func testChromeEvidenceRoundTripsWithoutLosingURL() throws {
+    func testChromeEvidenceRoundTripsWithoutLosingURL() throws {
         let evidence = ChromeTabEvidence(
             sessionID: "chrome-session-1",
             windowID: 1,
@@ -24,11 +24,11 @@ import Testing
             from: JSONEncoder().encode(evidence)
         )
 
-        #expect(decoded == evidence)
-        #expect(decoded.url == "https://v.youku.com/v_show/id_example")
+        XCTAssertTrue(decoded == evidence)
+        XCTAssertTrue(decoded.url == "https://v.youku.com/v_show/id_example")
     }
 
-    @Test func testEventStoreReloadsValidLinesAndSkipsMalformedInput() throws {
+    func testEventStoreReloadsValidLinesAndSkipsMalformedInput() throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "lidmute-events-\(UUID().uuidString).jsonl")
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -39,26 +39,26 @@ import Testing
         handle.write(Data("not-json\n".utf8))
         try handle.close()
 
-        #expect(try store.load().count == 1, "event store did not preserve only valid records")
+        XCTAssertTrue(try store.load().count == 1, "event store did not preserve only valid records")
     }
 
     @MainActor
-    @Test func testProtectionRestoresVolumeButKeepsMutedOnLidOpen() throws {
+    func testProtectionRestoresVolumeButKeepsMutedOnLidOpen() throws {
         let audio = FakeAudioController()
         let store = MemoryEventStore()
         let coordinator = ProtectionCoordinator(audio: audio, store: store)
 
         coordinator.setEnabled(true)
         coordinator.receiveLidState(closed: true)
-        #expect(audio.lastMute == true, "guard did not mute built-in speaker")
+        XCTAssertTrue(audio.lastMute == true, "guard did not mute built-in speaker")
 
         coordinator.receiveLidState(closed: false)
-        #expect(audio.lastMute == false)
-        #expect(audio.lastVolume == 0.72)
+        XCTAssertTrue(audio.lastMute == false)
+        XCTAssertTrue(audio.lastVolume == 0.72)
     }
 
     @MainActor
-    @Test func testManualDisableFullyRestoresCapturedSpeakerState() throws {
+    func testManualDisableFullyRestoresCapturedSpeakerState() throws {
         let audio = FakeAudioController()
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
 
@@ -66,12 +66,12 @@ import Testing
         coordinator.receiveLidState(closed: true)
         coordinator.setEnabled(false)
 
-        #expect(audio.lastMute == false)
-        #expect(audio.lastVolume == 0.72)
+        XCTAssertTrue(audio.lastMute == false)
+        XCTAssertTrue(audio.lastVolume == 0.72)
     }
 
     @MainActor
-    @Test func testManualDisableAfterLidOpenFullyRestoresCapturedSpeakerState() throws {
+    func testManualDisableAfterLidOpenFullyRestoresCapturedSpeakerState() throws {
         let audio = FakeAudioController()
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
 
@@ -80,12 +80,12 @@ import Testing
         coordinator.receiveLidState(closed: false)
         coordinator.setEnabled(false)
 
-        #expect(audio.lastMute == false)
-        #expect(audio.lastVolume == 0.72)
+        XCTAssertTrue(audio.lastMute == false)
+        XCTAssertTrue(audio.lastVolume == 0.72)
     }
 
     @MainActor
-    @Test func testVolumeFallbackKeepsOutputSilentOnLidOpen() throws {
+    func testVolumeFallbackKeepsOutputSilentOnLidOpen() throws {
         let audio = FakeAudioController()
         audio.capturedState = .init(muted: false, volume: 0.72, usedVolumeFallback: true)
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
@@ -94,39 +94,39 @@ import Testing
         coordinator.receiveLidState(closed: true)
         coordinator.receiveLidState(closed: false)
 
-        #expect(audio.lastMute == false)
-        #expect(audio.lastVolume == 0)
+        XCTAssertTrue(audio.lastMute == false)
+        XCTAssertTrue(audio.lastVolume == 0)
     }
 
     @MainActor
-    @Test func testEnablingGuardDoesNotChangeCurrentAudioState() throws {
+    func testEnablingGuardDoesNotChangeCurrentAudioState() throws {
         let audio = FakeAudioController()
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
 
         coordinator.setEnabled(true)
 
-        #expect(audio.enforceSilenceCount == 0)
-        #expect(audio.captureCount == 0)
-        #expect(audio.lastMute == false)
-        #expect(audio.lastVolume == 0.72)
+        XCTAssertTrue(audio.enforceSilenceCount == 0)
+        XCTAssertTrue(audio.captureCount == 0)
+        XCTAssertTrue(audio.lastMute == false)
+        XCTAssertTrue(audio.lastVolume == 0.72)
     }
 
     @MainActor
-    @Test func testNightProtectionMutesOnlyWhenPolicyIsActive() throws {
+    func testNightProtectionMutesOnlyWhenPolicyIsActive() throws {
         let audio = FakeAudioController()
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
 
         coordinator.setEnabled(true)
         coordinator.receiveNightProtection(false)
-        #expect(audio.enforceSilenceCount == 0, "inactive night policy muted the speaker")
+        XCTAssertTrue(audio.enforceSilenceCount == 0, "inactive night policy muted the speaker")
 
         coordinator.receiveNightProtection(true)
-        #expect(audio.enforceSilenceCount == 1)
-        #expect(audio.lastMute == true)
+        XCTAssertTrue(audio.enforceSilenceCount == 1)
+        XCTAssertTrue(audio.lastMute == true)
     }
 
     @MainActor
-    @Test func testNightProtectionRestoresWhenItEnds() throws {
+    func testNightProtectionRestoresWhenItEnds() throws {
         let audio = FakeAudioController()
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
 
@@ -134,12 +134,12 @@ import Testing
         coordinator.receiveNightProtection(true)
         coordinator.receiveNightProtection(false)
 
-        #expect(audio.lastMute == false)
-        #expect(audio.lastVolume == 0.72)
+        XCTAssertTrue(audio.lastMute == false)
+        XCTAssertTrue(audio.lastVolume == 0.72)
     }
 
     @MainActor
-    @Test func testNightEndDoesNotRestoreWhileLidIsClosed() throws {
+    func testNightEndDoesNotRestoreWhileLidIsClosed() throws {
         let audio = FakeAudioController()
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
 
@@ -148,52 +148,52 @@ import Testing
         coordinator.receiveNightProtection(true)
         coordinator.receiveNightProtection(false)
 
-        #expect(audio.lastMute == true, "night end unmuted an actively closed lid")
+        XCTAssertTrue(audio.lastMute == true, "night end unmuted an actively closed lid")
     }
 
-    @Test func testNightScheduleHandlesBeijingTimeAcrossMidnight() throws {
+    func testNightScheduleHandlesBeijingTimeAcrossMidnight() throws {
         let schedule = NightSchedule(startMinutes: 23 * 60, endMinutes: 8 * 60)
-        #expect(schedule.isActive(at: beijingDate(hour: 23, minute: 30)))
-        #expect(schedule.isActive(at: beijingDate(hour: 1, minute: 30)))
-        #expect(!(schedule.isActive(at: beijingDate(hour: 12))))
+        XCTAssertTrue(schedule.isActive(at: beijingDate(hour: 23, minute: 30)))
+        XCTAssertTrue(schedule.isActive(at: beijingDate(hour: 1, minute: 30)))
+        XCTAssertTrue(!(schedule.isActive(at: beijingDate(hour: 12))))
     }
 
-    @Test func testNightProtectionPreferencesPreserveLastValidSchedule() throws {
+    func testNightProtectionPreferencesPreserveLastValidSchedule() throws {
         let suiteName = "LidMuteTests.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let preferences = NightProtectionPreferences(defaults: defaults)
 
-        #expect(preferences.load() == NightProtectionConfiguration(
+        XCTAssertTrue(preferences.load() == NightProtectionConfiguration(
             enabled: false,
             startText: "00:00",
             endText: "08:00"
         ), "night preferences did not provide defaults")
 
         preferences.saveEnabled(true)
-        #expect(preferences.saveSchedule(startText: "23:30", endText: "07:15"), "valid night schedule was rejected")
-        #expect(!preferences.saveSchedule(startText: "25:00", endText: "07:15"), "invalid night schedule was persisted")
+        XCTAssertTrue(preferences.saveSchedule(startText: "23:30", endText: "07:15"), "valid night schedule was rejected")
+        XCTAssertTrue(!preferences.saveSchedule(startText: "25:00", endText: "07:15"), "invalid night schedule was persisted")
 
-        #expect(preferences.load() == NightProtectionConfiguration(
+        XCTAssertTrue(preferences.load() == NightProtectionConfiguration(
             enabled: true,
             startText: "23:30",
             endText: "07:15"
         ), "invalid edit replaced the last valid schedule")
     }
 
-    @Test func testMediaCommandsUseSystemKeyTypes() throws {
-        #expect(MediaCommand.previous.rawValue == 18)
-        #expect(MediaCommand.next.rawValue == 17)
-        #expect(MediaCommand.playPause.rawValue == 16)
+    func testMediaCommandsUseSystemKeyTypes() throws {
+        XCTAssertTrue(MediaCommand.previous.rawValue == 18)
+        XCTAssertTrue(MediaCommand.next.rawValue == 17)
+        XCTAssertTrue(MediaCommand.playPause.rawValue == 16)
 
         let events = MediaKeyEventDescriptor.events(for: .playPause)
-        #expect(events == [
+        XCTAssertTrue(events == [
             MediaKeyEventDescriptor(modifierFlags: 0xA00, data1: 0x100A00),
             MediaKeyEventDescriptor(modifierFlags: 0xB00, data1: 0x100B00),
         ])
     }
 
-    @Test func testAudioSourcePresentationPrefersReadableNames() throws {
+    func testAudioSourcePresentationPrefersReadableNames() throws {
         let chrome = activeProcess(pid: 1357)
         let tab = ChromeTabEvidence(
             sessionID: "session",
@@ -228,15 +228,15 @@ import Testing
         )
         let unknownSource = AudioSourcePresentation(process: unknown, chromeTab: nil)
 
-        #expect(chromeSource.title == "优酷")
-        #expect(chromeSource.subtitle == "Google Chrome · https://v.youku.com")
-        #expect(musicSource.title == "网易云音乐")
-        #expect(musicSource.subtitle == "com.netease.163music")
-        #expect(unknownSource.title == "PID 9753")
-        #expect(unknownSource.subtitle.isEmpty)
+        XCTAssertTrue(chromeSource.title == "优酷")
+        XCTAssertTrue(chromeSource.subtitle == "Google Chrome · https://v.youku.com")
+        XCTAssertTrue(musicSource.title == "网易云音乐")
+        XCTAssertTrue(musicSource.subtitle == "com.netease.163music")
+        XCTAssertTrue(unknownSource.title == "PID 9753")
+        XCTAssertTrue(unknownSource.subtitle.isEmpty)
     }
 
-    @Test func testCurrentAudioSourcesRequireAnActiveChromeProcess() throws {
+    func testCurrentAudioSourcesRequireAnActiveChromeProcess() throws {
         let chrome = activeProcess(pid: 1357)
         let tab = ChromeTabEvidence(
             sessionID: "session",
@@ -252,19 +252,19 @@ import Testing
             isIncognito: false
         )
 
-        #expect(AudioSourcePresentation.current(processes: [chrome], chromeTab: tab).first?.title == "优酷")
-        #expect(AudioSourcePresentation.current(processes: [], chromeTab: tab).isEmpty)
+        XCTAssertTrue(AudioSourcePresentation.current(processes: [chrome], chromeTab: tab).first?.title == "优酷")
+        XCTAssertTrue(AudioSourcePresentation.current(processes: [], chromeTab: tab).isEmpty)
     }
 
-    @Test func testEventPresentationUsesReadableChineseLabels() throws {
+    func testEventPresentationUsesReadableChineseLabels() throws {
         let detected = EventPresentation(kind: .audioProcessDetected)
         let restored = EventPresentation(kind: .restored)
-        #expect(detected.title == "检测到音频输出")
-        #expect(detected.symbolName == "waveform.badge.exclamationmark")
-        #expect(restored.title == "扬声器状态已恢复")
+        XCTAssertTrue(detected.title == "检测到音频输出")
+        XCTAssertTrue(detected.symbolName == "waveform.badge.exclamationmark")
+        XCTAssertTrue(restored.title == "扬声器状态已恢复")
     }
 
-    @Test func testMediaPauseRequestRetainsEvidenceAndReadablePresentation() throws {
+    func testMediaPauseRequestRetainsEvidenceAndReadablePresentation() throws {
         let process = activeProcess(pid: 1357)
         let request = MediaPauseRequest(
             trigger: .lidProtectionStarted,
@@ -276,15 +276,15 @@ import Testing
         let sent = EventPresentation(kind: .mediaPauseRequested)
         let failed = EventPresentation(kind: .mediaPauseRequestFailed)
 
-        #expect(request.source == .lid)
-        #expect(request.process == process)
-        #expect(sent.title == "已请求系统暂停")
-        #expect(sent.symbolName == "pause.circle.fill")
-        #expect(failed.title == "系统暂停请求失败")
+        XCTAssertTrue(request.source == .lid)
+        XCTAssertTrue(request.process == process)
+        XCTAssertTrue(sent.title == "已请求系统暂停")
+        XCTAssertTrue(sent.symbolName == "pause.circle.fill")
+        XCTAssertTrue(failed.title == "系统暂停请求失败")
     }
 
     @MainActor
-    @Test func testProtectedSourcesRequestPauseOnlyWithChromeEvidence() throws {
+    func testProtectedSourcesRequestPauseOnlyWithChromeEvidence() throws {
         let cases: [(MediaPauseTrigger, ProtectionSource, @MainActor (ProtectionCoordinator) -> Void)] = [
             (.lidProtectionStarted, .lid, { $0.receiveLidState(closed: true) }),
             (.simulatedLidProtectionStarted, .lid, { $0.receiveLidState(closed: true, simulated: true) }),
@@ -301,11 +301,11 @@ import Testing
             coordinator.setEnabled(true)
             activate(coordinator)
 
-            #expect(requests.count == 1)
-            let request = try #require(requests.first)
-            #expect(request.trigger == expectedTrigger)
-            #expect(request.source == source)
-            #expect(request.process?.bundleID == "com.google.Chrome")
+            XCTAssertTrue(requests.count == 1)
+            let request = try XCTUnwrap(requests.first)
+            XCTAssertTrue(request.trigger == expectedTrigger)
+            XCTAssertTrue(request.source == source)
+            XCTAssertTrue(request.process?.bundleID == "com.google.Chrome")
         }
 
         let silentCoordinator = ProtectionCoordinator(audio: FakeAudioController(), store: MemoryEventStore())
@@ -313,11 +313,11 @@ import Testing
         silentCoordinator.onMediaPauseRequest = { _ in silentRequests += 1 }
         silentCoordinator.setEnabled(true)
         silentCoordinator.receiveLidState(closed: true)
-        #expect(silentRequests == 0, "protection requested pause without Chrome audio evidence")
+        XCTAssertTrue(silentRequests == 0, "protection requested pause without Chrome audio evidence")
     }
 
     @MainActor
-    @Test func testProtectionExitNeverRequestsMediaPlayback() throws {
+    func testProtectionExitNeverRequestsMediaPlayback() throws {
         let audio = FakeAudioController()
         audio.activeProcesses = [activeProcess(pid: 1357)]
         let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
@@ -330,11 +330,11 @@ import Testing
         coordinator.receiveLidState(closed: false)
         coordinator.setEnabled(false)
 
-        #expect(requestCount == countWhileProtected, "protection exit sent a media command")
+        XCTAssertTrue(requestCount == countWhileProtected, "protection exit sent a media command")
     }
 
     @MainActor
-    @Test func testChromePauseRequestsUseGlobalDebounce() throws {
+    func testChromePauseRequestsUseGlobalDebounce() throws {
         var clock = Date(timeIntervalSince1970: 1_000)
         let coordinator = ProtectionCoordinator(
             audio: FakeAudioController(),
@@ -362,17 +362,17 @@ import Testing
         coordinator.receiveLidState(closed: true)
         coordinator.receiveChromeEvidence(evidence)
         coordinator.receiveChromeEvidence(evidence)
-        #expect(requests.count == 1, "Chrome pause request ignored debounce")
+        XCTAssertTrue(requests.count == 1, "Chrome pause request ignored debounce")
 
         clock = clock.addingTimeInterval(3.1)
         coordinator.receiveChromeEvidence(evidence)
-        #expect(requests.count == 2)
-        #expect(requests[1].trigger == .chromeAudioStarted)
-        #expect(requests[1].chromeTab == evidence)
+        XCTAssertTrue(requests.count == 2)
+        XCTAssertTrue(requests[1].trigger == .chromeAudioStarted)
+        XCTAssertTrue(requests[1].chromeTab == evidence)
     }
 
     @MainActor
-    @Test func testMediaPauseResultsUseHonestEventWording() throws {
+    func testMediaPauseResultsUseHonestEventWording() throws {
         let store = MemoryEventStore()
         let coordinator = ProtectionCoordinator(audio: FakeAudioController(), store: store)
         let request = MediaPauseRequest(
@@ -386,16 +386,16 @@ import Testing
         coordinator.recordMediaPauseResult(request, errorDescription: nil)
         coordinator.recordMediaPauseResult(request, errorDescription: "event failed")
 
-        #expect(store.events.count == 2)
-        #expect(store.events[0].kind == .mediaPauseRequested)
-        #expect(store.events[0].detail.contains("已发送系统暂停请求"))
-        #expect(!(store.events[0].detail.contains("网页已暂停")))
-        #expect(store.events[1].kind == .mediaPauseRequestFailed)
-        #expect(store.events[1].detail.contains("event failed"))
+        XCTAssertTrue(store.events.count == 2)
+        XCTAssertTrue(store.events[0].kind == .mediaPauseRequested)
+        XCTAssertTrue(store.events[0].detail.contains("已发送系统暂停请求"))
+        XCTAssertTrue(!(store.events[0].detail.contains("网页已暂停")))
+        XCTAssertTrue(store.events[1].kind == .mediaPauseRequestFailed)
+        XCTAssertTrue(store.events[1].detail.contains("event failed"))
     }
 
     @MainActor
-    @Test func testTimelineRecordsOnlyWhileGuardIsEnabled() throws {
+    func testTimelineRecordsOnlyWhileGuardIsEnabled() throws {
         let store = MemoryEventStore()
         let coordinator = ProtectionCoordinator(audio: FakeAudioController(), store: store)
         let evidence = ChromeTabEvidence(
@@ -413,18 +413,18 @@ import Testing
         )
 
         coordinator.receiveChromeEvidence(evidence)
-        #expect(store.events.isEmpty, "disabled guard still recorded Chrome timeline events")
+        XCTAssertTrue(store.events.isEmpty, "disabled guard still recorded Chrome timeline events")
 
         coordinator.setEnabled(true)
         coordinator.receiveChromeEvidence(evidence)
-        #expect(store.events.count == 2)
-        #expect(store.events[0].kind == .protectionEnabled)
-        #expect(store.events[1].kind == .chromeTabAudible)
+        XCTAssertTrue(store.events.count == 2)
+        XCTAssertTrue(store.events[0].kind == .protectionEnabled)
+        XCTAssertTrue(store.events[1].kind == .chromeTabAudible)
 
         coordinator.setEnabled(false)
         let countAfterDisable = store.events.count
         coordinator.receiveChromeEvidence(evidence)
-        #expect(store.events.count == countAfterDisable, "guard recorded Chrome timeline events after being disabled")
+        XCTAssertTrue(store.events.count == countAfterDisable, "guard recorded Chrome timeline events after being disabled")
     }
 
     private func beijingDate(hour: Int, minute: Int = 0) -> Date {
@@ -434,7 +434,7 @@ import Testing
     }
 
     @MainActor
-    @Test func testRepeatedAudioSnapshotsDoNotDuplicateLogEvents() throws {
+    func testRepeatedAudioSnapshotsDoNotDuplicateLogEvents() throws {
         let audio = FakeAudioController()
         let store = MemoryEventStore()
         let coordinator = ProtectionCoordinator(audio: audio, store: store)
@@ -447,12 +447,12 @@ import Testing
         let enforcementCountAfterFirstSnapshot = audio.enforceSilenceCount
         coordinator.receiveAudioSnapshot([process])
 
-        #expect(store.events.count == countAfterFirstSnapshot)
-        #expect(audio.enforceSilenceCount == enforcementCountAfterFirstSnapshot + 1)
+        XCTAssertTrue(store.events.count == countAfterFirstSnapshot)
+        XCTAssertTrue(audio.enforceSilenceCount == enforcementCountAfterFirstSnapshot + 1)
     }
 
     @MainActor
-    @Test func testAudioProcessCanBeLoggedAgainAfterStopping() throws {
+    func testAudioProcessCanBeLoggedAgainAfterStopping() throws {
         let store = MemoryEventStore()
         let coordinator = ProtectionCoordinator(audio: FakeAudioController(), store: store)
         let process = activeProcess(pid: 1357)
@@ -464,11 +464,11 @@ import Testing
         coordinator.receiveAudioSnapshot([])
         coordinator.receiveAudioSnapshot([process])
 
-        #expect(store.events.count > firstCount, "reactivated audio process was not logged again")
+        XCTAssertTrue(store.events.count > firstCount, "reactivated audio process was not logged again")
     }
 
     @MainActor
-    @Test func testSilenceErrorIsLoggedAgainAfterAudioRestarts() throws {
+    func testSilenceErrorIsLoggedAgainAfterAudioRestarts() throws {
         let audio = FakeAudioController()
         let store = MemoryEventStore()
         let coordinator = ProtectionCoordinator(audio: audio, store: store)
@@ -482,7 +482,7 @@ import Testing
         coordinator.receiveAudioSnapshot([process])
 
         let errorCount = store.events.filter { $0.kind == .error }.count
-        #expect(errorCount == 2, "a new audio activity period did not record its silence error")
+        XCTAssertTrue(errorCount == 2, "a new audio activity period did not record its silence error")
     }
 
     private func activeProcess(pid: Int32) -> AudioProcess {
@@ -496,42 +496,42 @@ import Testing
         )
     }
 
-    @Test func testVisualLayoutKeepsCardsFlush() throws {
-        #expect(VisualLayoutMetrics.cardSpacing == 0)
-        #expect(VisualLayoutMetrics.automationCardHeight + VisualLayoutMetrics.simulationCardHeight == VisualLayoutMetrics.middleDeckHeight)
+    func testVisualLayoutKeepsCardsFlush() throws {
+        XCTAssertTrue(VisualLayoutMetrics.cardSpacing == 0)
+        XCTAssertTrue(VisualLayoutMetrics.automationCardHeight + VisualLayoutMetrics.simulationCardHeight == VisualLayoutMetrics.middleDeckHeight)
     }
 
-    @Test func testVisualLayoutShowsExactlyThreeTimelineRowsByDefault() throws {
+    func testVisualLayoutShowsExactlyThreeTimelineRowsByDefault() throws {
         let expected = VisualLayoutMetrics.timelineRowHeight * Double(VisualLayoutMetrics.timelineVisibleRowCount)
-        #expect(VisualLayoutMetrics.timelineDefaultViewportHeight == expected, "timeline default viewport is not exactly three rows")
+        XCTAssertTrue(VisualLayoutMetrics.timelineDefaultViewportHeight == expected, "timeline default viewport is not exactly three rows")
     }
 
-    @Test func testVisualLayoutAssignsExtraHeightOnlyToTimeline() throws {
+    func testVisualLayoutAssignsExtraHeightOnlyToTimeline() throws {
         let defaultContentHeight = VisualLayoutMetrics.defaultWindowHeight - VisualLayoutMetrics.appPadding * 2
         let stretchedContentHeight = defaultContentHeight + 160
         let defaultViewport = VisualLayoutMetrics.timelineViewportHeight(forAvailableContentHeight: defaultContentHeight)
         let stretchedViewport = VisualLayoutMetrics.timelineViewportHeight(forAvailableContentHeight: stretchedContentHeight)
 
-        #expect(defaultViewport == VisualLayoutMetrics.timelineDefaultViewportHeight, "default timeline viewport is not clamped to three rows")
-        #expect(stretchedViewport == defaultViewport + 160, "extra window height was not assigned only to the timeline")
+        XCTAssertTrue(defaultViewport == VisualLayoutMetrics.timelineDefaultViewportHeight, "default timeline viewport is not clamped to three rows")
+        XCTAssertTrue(stretchedViewport == defaultViewport + 160, "extra window height was not assigned only to the timeline")
     }
 
-    @Test func testChromeFrameCapturesAudibleTabDetails() throws {
+    func testChromeFrameCapturesAudibleTabDetails() throws {
         let json = #"{"v":1,"type":"tab_audio_started","eventId":"e","extensionSessionId":"s","seq":"1","sentAt":"2026-07-10T01:22:56Z","tab":{"windowId":3,"tabId":9,"index":1,"title":"优酷","url":"https://v.youku.com","status":"complete","audible":true,"muted":{"value":false},"active":false,"pinned":false,"incognito":false}}"#
         let evidence = try ChromeBridgeFrame.decode(Data(json.utf8)).evidence
-        #expect(evidence.tabID == 9)
-        #expect(evidence.url == "https://v.youku.com")
-        #expect(evidence.audible)
+        XCTAssertTrue(evidence.tabID == 9)
+        XCTAssertTrue(evidence.url == "https://v.youku.com")
+        XCTAssertTrue(evidence.audible)
     }
 
-    @Test func testChromeEventDeduplicatorPersistsAcceptedIDs() throws {
+    func testChromeEventDeduplicatorPersistsAcceptedIDs() throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "lidmute-seen-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
 
         let first = ChromeEventDeduplicator(url: url)
-        #expect(try first.accept("chrome-event-1"), "first Chrome event should be accepted")
-        #expect(!(try first.accept("chrome-event-1")), "duplicate Chrome event should be rejected")
+        XCTAssertTrue(try first.accept("chrome-event-1"), "first Chrome event should be accepted")
+        XCTAssertTrue(!(try first.accept("chrome-event-1")), "duplicate Chrome event should be rejected")
         let restarted = ChromeEventDeduplicator(url: url)
-        #expect(!(try restarted.accept("chrome-event-1")), "persisted Chrome event should remain rejected after restart")
+        XCTAssertTrue(!(try restarted.accept("chrome-event-1")), "persisted Chrome event should remain rejected after restart")
     }
 }
