@@ -45,3 +45,29 @@ final class FakeAudioController: AudioControlling, @unchecked Sendable {
     }
     func activeOutputProcesses() throws -> [AudioProcess] { activeProcesses }
 }
+
+extension SpeakerRecoverySnapshot {
+    static func fixture(
+        transactionID: UUID = UUID(),
+        stage: SpeakerRecoveryStage = .protected
+    ) -> Self {
+        SpeakerRecoverySnapshot(
+            transactionID: transactionID,
+            device: AudioDevice(
+                id: 7,
+                uid: "built-in-a",
+                name: "MacBook Speakers",
+                isBuiltIn: true
+            ),
+            originalState: AudioDeviceState(
+                muted: false,
+                volume: 0.72,
+                usedVolumeFallback: false
+            ),
+            stage: stage,
+            capturedAt: Date(timeIntervalSince1970: 1_723_500_000),
+            sources: [.physicalLid, .night],
+            appVersion: "1.0-test"
+        )
+    }
+}
