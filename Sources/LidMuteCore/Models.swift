@@ -189,9 +189,15 @@ public protocol EventStoring: AnyObject, Sendable {
 }
 
 public protocol AudioControlling: AnyObject, Sendable {
-    func builtInSpeaker() throws -> AudioDevice?
+    func resolveBuiltInSpeaker(uid: String?) throws -> AudioDevice?
     func captureState(of device: AudioDevice) throws -> AudioDeviceState
     func enforceSilence(on device: AudioDevice) throws
     func restore(_ state: AudioDeviceState, on device: AudioDevice) throws
     func activeOutputProcesses() throws -> [AudioProcess]
+}
+
+public extension AudioControlling {
+    func builtInSpeaker() throws -> AudioDevice? {
+        try resolveBuiltInSpeaker(uid: nil)
+    }
 }

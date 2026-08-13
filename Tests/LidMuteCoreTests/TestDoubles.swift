@@ -24,7 +24,10 @@ final class FakeAudioController: AudioControlling, @unchecked Sendable {
     var lastMute: Bool? = false
     var lastVolume: Float? = 0.72
 
-    func builtInSpeaker() throws -> AudioDevice? { device }
+    func resolveBuiltInSpeaker(uid: String?) throws -> AudioDevice? {
+        guard uid == nil || uid == device.uid else { return nil }
+        return device
+    }
     func captureState(of device: AudioDevice) throws -> AudioDeviceState {
         captureCount += 1
         return capturedState
