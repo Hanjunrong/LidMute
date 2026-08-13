@@ -240,6 +240,10 @@ public protocol SpeakerProtectionApplying: Sendable {
     func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome
 }
 
+protocol SynchronousSpeakerProtectionApplying: SpeakerProtectionApplying {
+    func applySynchronously(_ action: SpeakerProtectionAction) -> SpeakerRecoveryOutcome
+}
+
 public protocol PendingSpeakerRecovering: Sendable {
     func recoverPending() async -> SpeakerRecoveryOutcome
 }

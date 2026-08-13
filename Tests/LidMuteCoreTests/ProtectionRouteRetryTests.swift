@@ -19,12 +19,12 @@ final class ProtectionRouteRetryTests: XCTestCase {
             store: MemoryEventStore()
         )
 
-        coordinator.setEnabled(true)
-        coordinator.receivePhysicalLid(closed: true)
+        await coordinator.setEnabled(true)
+        await coordinator.receivePhysicalLid(closed: true)
         XCTAssertEqual(coordinator.state, .unavailable)
 
         audio.defaultBuiltIn = audio.resolvedUIDs["built-in-a"]
-        coordinator.receiveAudioRouteChanged()
+        await coordinator.receiveAudioRouteChanged()
 
         XCTAssertEqual(coordinator.state, .protecting)
         XCTAssertEqual(audio.writtenDeviceUIDs, ["built-in-a"])
@@ -43,11 +43,11 @@ final class ProtectionRouteRetryTests: XCTestCase {
             processEvidence: audio,
             store: MemoryEventStore()
         )
-        coordinator.setEnabled(true)
-        coordinator.receivePhysicalLid(closed: true)
+        await coordinator.setEnabled(true)
+        await coordinator.receivePhysicalLid(closed: true)
 
         audio.defaultBuiltIn = nil
-        coordinator.receivePhysicalLid(closed: false)
+        await coordinator.receivePhysicalLid(closed: false)
 
         XCTAssertEqual(coordinator.state, .armed)
         XCTAssertFalse(audio.writtenDeviceUIDs.isEmpty)

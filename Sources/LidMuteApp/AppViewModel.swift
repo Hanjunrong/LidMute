@@ -40,7 +40,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     var canToggleGuard: Bool { lifecycleState == .ready }
 
-    private let coordinator: ProtectionCoordinator
+    private let coordinator: ProtectionCoordinator<SpeakerRecoveryRuntime>
     private let audioController: SystemAudioController
     private let recoveryRuntime: SpeakerRecoveryRuntime
     private lazy var lifecycleCoordinator = ApplicationLifecycleCoordinator(
@@ -69,7 +69,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var effectiveNightSchedule = NightSchedule(startMinutes: 0, endMinutes: 8 * 60)
     private var hasStarted = false
     private var isShuttingDown = false
+    private var protectionEventTask: Task<Void, Never>?
     private var routeChangeTask: Task<Void, Never>?
+    private var routeChangePending = false
 
     init() {
         self.applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -143,11 +145,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
         if nightTimer == nil {
             nightTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.refreshNightProtection() }
+                Task { @MainActor [weak self] in await self?.refreshNightProtection() }
             }
         }
         pollAudioProcesses()
-        refreshNightProtection()
+        Task { @MainActor [weak self] in await self?.refreshNightProtection() }
     }
 
     func startRouteOnly() throws {
@@ -167,8 +169,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         inboxTimer = nil
         nightTimer?.invalidate()
         nightTimer = nil
+        protectionEventTask?.cancel()
+        protectionEventTask = nil
         routeChangeTask?.cancel()
         routeChangeTask = nil
+        routeChangePending = false
     }
 
     func shutdownAndRestore() async -> ShutdownOutcome {
@@ -177,60 +182,100 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
         isShuttingDown = true
         lifecycleCoordinator.stop()
+        let pendingProtectionEvents = protectionEventTask
         stopAll()
-        let outcome = await recoveryRuntime.recoverPending()
+        await pendingProtectionEvents?.value
+        let outcome = await coordinator.endProtectionForShutdown()
         isEnabled = false
         refresh()
         return mapShutdownOutcome(outcome)
     }
 
+    func resumeAfterCancelledTermination() async {
+        isShuttingDown = false
+        routeChangeTask = nil
+        lifecycleCoordinator.resume()
+        switch lifecycleState {
+        case .ready:
+            do {
+                try startAll()
+            } catch {
+                lifecycleState = .recoveryBlocked(.failedSafetyUnknown)
+            }
+        case .recoveryBlocked(.waitingForMatchingDevice):
+            do {
+                try startRouteOnly()
+            } catch {
+                lifecycleState = .recoveryBlocked(.failedSafetyUnknown)
+            }
+        case .recovering, .recoveryBlocked:
+            break
+        }
+        refresh()
+    }
+
     func setEnabled(_ enabled: Bool) {
         guard canToggleGuard, !isShuttingDown else { return }
         isEnabled = enabled
-        coordinator.setEnabled(enabled)
         if !enabled {
             isNightProtectionActive = false
         }
-        if enabled, let latestSystemLidClosed {
-            coordinator.receivePhysicalLid(closed: latestSystemLidClosed)
+        enqueueProtectionEvent { model in
+            guard !model.isShuttingDown else { return }
+            await model.coordinator.setEnabled(enabled)
+            if enabled, let latestSystemLidClosed = model.latestSystemLidClosed {
+                await model.coordinator.receivePhysicalLid(closed: latestSystemLidClosed)
+            }
+            await model.refreshNightProtection()
+            model.refresh()
         }
-        refreshNightProtection()
-        refresh()
     }
 
     func receiveSystemLidState(_ closed: Bool) {
         guard lifecycleState == .ready, !isShuttingDown else { return }
         latestSystemLidClosed = closed
-        coordinator.receivePhysicalLid(closed: closed)
-        refresh()
+        enqueueProtectionEvent { model in
+            guard !model.isShuttingDown else { return }
+            await model.coordinator.receivePhysicalLid(closed: closed)
+            model.refresh()
+        }
     }
 
     func receiveDisplaySleep(_ sleeping: Bool) {
         guard lifecycleState == .ready, !isShuttingDown else { return }
         isDisplaySleeping = sleeping
-        refreshNightProtection()
+        enqueueProtectionEvent { model in await model.refreshNightProtection() }
     }
 
     func simulateLidClosed() {
         guard lifecycleState == .ready, !isShuttingDown else { return }
         guard simulatedLidState != .closed else { return }
         simulatedLidState = .closed
-        simulationProtectionLifecycle.update(.closed)
-        refresh()
+        enqueueProtectionEvent { model in
+            guard !model.isShuttingDown else { return }
+            await model.simulationProtectionLifecycle.update(.closed)
+            model.refresh()
+        }
     }
 
     func simulateLidOpened() {
         guard lifecycleState == .ready, !isShuttingDown else { return }
         guard simulatedLidState != .opened else { return }
         simulatedLidState = .opened
-        simulationProtectionLifecycle.update(.opened)
-        refresh()
+        enqueueProtectionEvent { model in
+            guard !model.isShuttingDown else { return }
+            await model.simulationProtectionLifecycle.update(.opened)
+            model.refresh()
+        }
     }
 
     func resetSimulationState() {
+        guard lifecycleState == .ready, !isShuttingDown else { return }
         simulatedLidState = .opened
-        simulationProtectionLifecycle.update(.reset)
-        refresh()
+        enqueueProtectionEvent { model in
+            await model.simulationProtectionLifecycle.update(.reset)
+            model.refresh()
+        }
     }
 
     func setLightweightModeEnabled(_ enabled: Bool) {
@@ -241,7 +286,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     func setNightScheduleEnabled(_ enabled: Bool) {
         nightScheduleEnabled = enabled
         nightPreferences.saveEnabled(enabled)
-        refreshNightProtection()
+        enqueueProtectionEvent { model in await model.refreshNightProtection() }
     }
 
     func nightScheduleTextChanged() {
@@ -250,7 +295,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
            let endMinutes = NightProtectionPreferences.minutes(from: nightEndText) {
             effectiveNightSchedule = NightSchedule(startMinutes: startMinutes, endMinutes: endMinutes)
         }
-        refreshNightProtection()
+        enqueueProtectionEvent { model in await model.refreshNightProtection() }
     }
 
     func sendMediaCommand(_ command: MediaCommand) {
@@ -281,7 +326,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                   (try? chromeDeduplicator.accept(decoded.eventID)) == true else { continue }
             chromeBridgeStatus = "已接收 Chrome 标签页事件"
             latestChromeEvidence = decoded.evidence
-            coordinator.receiveChromeEvidence(decoded.evidence)
+            enqueueProtectionEvent { model in
+                guard !model.isShuttingDown else { return }
+                await model.coordinator.receiveChromeEvidence(decoded.evidence)
+                model.refresh()
+            }
             received = true
         }
         if received {
@@ -309,7 +358,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             latestChromeEvidence = nil
         }
         rebuildCurrentAudioSources()
-        coordinator.receiveAudioSnapshot(processes)
+        enqueueProtectionEvent { model in
+            guard !model.isShuttingDown else { return }
+            await model.coordinator.receiveAudioSnapshot(processes)
+            model.refresh()
+        }
     }
 
     private func rebuildCurrentAudioSources() {
@@ -319,7 +372,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         )
     }
 
-    private func refreshNightProtection() {
+    private func refreshNightProtection() async {
         guard lifecycleState == .ready, !isShuttingDown else { return }
         let validTime = NightProtectionPreferences.minutes(from: nightStartText) != nil &&
             NightProtectionPreferences.minutes(from: nightEndText) != nil
@@ -330,7 +383,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         let shouldProtect = isEnabled && nightScheduleEnabled && isDisplaySleeping && effectiveNightSchedule.isActive(at: Date())
         guard shouldProtect != isNightProtectionActive else { return }
         isNightProtectionActive = shouldProtect
-        coordinator.receiveNightProtection(shouldProtect)
+        await coordinator.receiveNightProtection(shouldProtect)
         refresh()
     }
 
@@ -504,19 +557,39 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     private func receiveAudioRouteChanged() {
-        guard !isShuttingDown, routeChangeTask == nil else { return }
+        guard !isShuttingDown else { return }
+        if routeChangeTask != nil {
+            routeChangePending = true
+            return
+        }
         routeChangeTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { routeChangeTask = nil }
-            await lifecycleCoordinator.receiveAudioRouteChanged()
-            lifecycleState = lifecycleCoordinator.state
-            guard lifecycleState == .ready, !isShuttingDown else {
-                refresh()
-                return
+            defer {
+                routeChangeTask = nil
+                routeChangePending = false
             }
-            coordinator.receiveAudioRouteChanged()
-            refresh()
+            repeat {
+                routeChangePending = false
+                await lifecycleCoordinator.receiveAudioRouteChanged()
+                lifecycleState = lifecycleCoordinator.state
+                if lifecycleState == .ready, !isShuttingDown {
+                    await coordinator.receiveAudioRouteChanged()
+                }
+                refresh()
+            } while routeChangePending && !isShuttingDown
         }
+    }
+
+    private func enqueueProtectionEvent(
+        _ operation: @escaping @MainActor (AppViewModel) async -> Void
+    ) {
+        let predecessor = protectionEventTask
+        let task = Task { @MainActor [weak self] in
+            await predecessor?.value
+            guard let self else { return }
+            await operation(self)
+        }
+        protectionEventTask = task
     }
 
     private func recoveryBlockedStatus(_ outcome: SpeakerRecoveryOutcome) -> String {

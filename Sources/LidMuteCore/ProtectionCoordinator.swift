@@ -1,12 +1,12 @@
 import Foundation
 
 @MainActor
-public final class ProtectionCoordinator {
+public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> {
     public private(set) var state: ProtectionState = .inactive
     public private(set) var isEnabled = false
     public var onEvent: ((LidMuteEvent) -> Void)?
 
-    private let protection: any SpeakerProtectionApplying
+    private let protection: Protection
     private let processEvidence: any AudioProcessEvidenceProviding
     private let store: EventStoring
     private var activeSources: Set<ProtectionSource> = []
@@ -15,9 +15,11 @@ public final class ProtectionCoordinator {
     private var activeOutputPIDs: Set<Int32> = []
     private var lastSilenceError: String?
     private var sequence: UInt64 = 0
+    private var transitionTask: Task<Void, Never>?
+    private var transitionSequence: UInt64 = 0
 
     public init(
-        protection: any SpeakerProtectionApplying,
+        protection: Protection,
         processEvidence: any AudioProcessEvidenceProviding,
         store: EventStoring
     ) {
@@ -26,25 +28,128 @@ public final class ProtectionCoordinator {
         self.store = store
     }
 
-    public convenience init<ProtectionAndEvidence>(
-        audio: ProtectionAndEvidence,
+    public convenience init(
+        audio: Protection,
         store: EventStoring
-    ) where ProtectionAndEvidence: SpeakerProtectionApplying & AudioProcessEvidenceProviding {
+    ) where Protection: AudioProcessEvidenceProviding {
         self.init(protection: audio, processEvidence: audio, store: store)
     }
 
-    public func setEnabled(_ enabled: Bool) {
-        guard enabled != isEnabled else { return }
-        if !enabled {
-            let outcome = activeSources.isEmpty
-                ? SpeakerRecoveryOutcome.noPendingRecovery
-                : perform(.end)
+    public func setEnabled(_ enabled: Bool) async {
+        _ = await enqueue(.setEnabled(enabled))
+    }
+
+    public func receivePhysicalLid(closed: Bool) async {
+        _ = await enqueue(.physicalLid(closed))
+    }
+
+    public func receiveSimulation(_ simulation: SimulationLidState) async {
+        _ = await enqueue(.simulation(simulation))
+    }
+
+    public func receiveLidState(closed: Bool, simulated: Bool = false) async {
+        _ = await enqueue(simulated ? .simulation(closed ? .closed : .opened) : .physicalLid(closed))
+    }
+
+    public func receiveNightProtection(_ active: Bool) async {
+        _ = await enqueue(.night(active))
+    }
+
+    public func receiveAudioSnapshot(_ processes: [AudioProcess]) async {
+        _ = await enqueue(.audioSnapshot(processes))
+    }
+
+    public func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async {
+        _ = await enqueue(.chromeEvidence(evidence))
+    }
+
+    public func receiveAudioRouteChanged() async {
+        _ = await enqueue(.audioRouteChanged)
+    }
+
+    public func endProtectionForShutdown() async -> SpeakerRecoveryOutcome {
+        await enqueue(.shutdown)
+    }
+
+    private func enqueue(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {
+        let predecessor = transitionTask
+        transitionSequence += 1
+        let sequence = transitionSequence
+        let task = Task { @MainActor [weak self] in
+            await predecessor?.value
+            guard let self else { return SpeakerRecoveryOutcome.failedSafetyUnknown }
+            return await self.process(input)
+        }
+        transitionTask = Task { _ = await task.value }
+        let outcome = await task.value
+        if transitionSequence == sequence { transitionTask = nil }
+        return outcome
+    }
+
+    private func process(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {
+        guard let prepared = prepare(input) else { return .noPendingRecovery }
+        let outcome = await protection.apply(prepared.action)
+        complete(prepared.completion, outcome: outcome)
+        return outcome
+    }
+
+    private func prepare(_ input: ProtectionCoordinatorInput) -> PreparedProtectionAction? {
+        switch input {
+        case let .setEnabled(enabled):
+            return prepareEnabled(enabled)
+        case let .physicalLid(closed):
+            guard isEnabled, observedPhysicalLidClosed != closed else { return nil }
+            observedPhysicalLidClosed = closed
+            activeOutputPIDs.removeAll()
+            lastSilenceError = nil
+            record(closed ? .lidClosed : .lidOpened, closed ? "检测到合盖" : "检测到开盖")
+            return prepareProtectionSource(.physicalLid, active: closed)
+        case let .simulation(simulation):
+            return prepareSimulation(simulation)
+        case let .night(active):
+            guard isEnabled else { return nil }
+            record(
+                active ? .nightProtectionStarted : .nightProtectionEnded,
+                active ? "进入夜间息屏静音时段" : "夜间息屏静音时段结束"
+            )
+            return prepareProtectionSource(.night, active: active)
+        case let .audioSnapshot(processes):
+            return prepareAudioSnapshot(processes)
+        case let .chromeEvidence(evidence):
+            return prepareChromeEvidence(evidence)
+        case .audioRouteChanged:
+            guard isEnabled, !activeSources.isEmpty else { return nil }
+            return PreparedProtectionAction(
+                action: .routeChangedWhileProtectionRequired(sources: activeSources),
+                completion: .routeChanged
+            )
+        case .shutdown:
             isEnabled = false
             activeSources.removeAll()
             resetObservationState(preservingSimulation: true)
-            state = endState(for: outcome, readyState: .inactive)
+            return PreparedProtectionAction(
+                action: .end,
+                completion: .end(readyState: .inactive, recordsRestored: false)
+            )
+        }
+    }
+
+    private func prepareEnabled(_ enabled: Bool) -> PreparedProtectionAction? {
+        guard enabled != isEnabled else { return nil }
+        if !enabled {
+            let needsRestore = !activeSources.isEmpty
+            isEnabled = false
+            activeSources.removeAll()
+            resetObservationState(preservingSimulation: true)
             record(.protectionDisabled, "守卫已关闭")
-            return
+            guard needsRestore else {
+                state = .inactive
+                return nil
+            }
+            return PreparedProtectionAction(
+                action: .end,
+                completion: .end(readyState: .inactive, recordsRestored: false)
+            )
         }
 
         let simulationToReplay = observedSimulation
@@ -53,75 +158,50 @@ public final class ProtectionCoordinator {
         resetObservationState()
         state = .armed
         record(.protectionEnabled, "守卫已开启，等待合盖")
-        if simulationToReplay == .closed {
-            receiveSimulation(.closed)
-        }
+        guard simulationToReplay == .closed else { return nil }
+        return prepareSimulation(.closed)
     }
 
-    public func receivePhysicalLid(closed: Bool) {
-        guard isEnabled else { return }
-        guard observedPhysicalLidClosed != closed else { return }
-        observedPhysicalLidClosed = closed
-        activeOutputPIDs.removeAll()
-        lastSilenceError = nil
-
-        if closed {
-            record(.lidClosed, "检测到合盖")
-            updateProtectionSource(.physicalLid, active: true)
-        } else {
-            record(.lidOpened, "检测到开盖")
-            updateProtectionSource(.physicalLid, active: false)
-        }
-    }
-
-    public func receiveSimulation(_ simulation: SimulationLidState) {
+    private func prepareSimulation(_ simulation: SimulationLidState) -> PreparedProtectionAction? {
         guard isEnabled else {
             observedSimulation = simulation == .reset ? nil : simulation
-            return
+            return nil
         }
-        guard simulation == .reset || observedSimulation != simulation else { return }
+        guard simulation == .reset || observedSimulation != simulation else { return nil }
 
         switch simulation {
         case .closed:
             observedSimulation = .closed
-            activeOutputPIDs.removeAll()
-            lastSilenceError = nil
             record(.simulation, "模拟合盖")
-            updateProtectionSource(.simulation, active: true)
         case .opened:
             observedSimulation = .opened
-            activeOutputPIDs.removeAll()
-            lastSilenceError = nil
             record(.simulation, "模拟开盖")
-            updateProtectionSource(.simulation, active: false)
         case .reset:
             observedSimulation = nil
-            activeOutputPIDs.removeAll()
-            lastSilenceError = nil
             record(.simulation, "已重置模拟合盖状态")
-            updateProtectionSource(.simulation, active: false)
         }
+        activeOutputPIDs.removeAll()
+        lastSilenceError = nil
+        return prepareProtectionSource(.simulation, active: simulation == .closed)
     }
 
-    public func receiveLidState(closed: Bool, simulated: Bool = false) {
-        if simulated {
-            receiveSimulation(closed ? .closed : .opened)
-        } else {
-            receivePhysicalLid(closed: closed)
+    private func prepareProtectionSource(_ source: ProtectionSource, active: Bool) -> PreparedProtectionAction? {
+        let wasProtected = !activeSources.isEmpty
+        if active {
+            guard activeSources.insert(source).inserted else { return nil }
+            guard !wasProtected else { return nil }
+            return PreparedProtectionAction(action: .begin(sources: activeSources), completion: .begin)
         }
-    }
 
-    public func receiveNightProtection(_ active: Bool) {
-        guard isEnabled else { return }
-        record(
-            active ? .nightProtectionStarted : .nightProtectionEnded,
-            active ? "进入夜间息屏静音时段" : "夜间息屏静音时段结束"
+        guard activeSources.remove(source) != nil, activeSources.isEmpty else { return nil }
+        return PreparedProtectionAction(
+            action: .end,
+            completion: .end(readyState: .armed, recordsRestored: true)
         )
-        updateProtectionSource(.night, active: active)
     }
 
-    public func receiveAudioSnapshot(_ processes: [AudioProcess]) {
-        guard isEnabled, !activeSources.isEmpty else { return }
+    private func prepareAudioSnapshot(_ processes: [AudioProcess]) -> PreparedProtectionAction? {
+        guard isEnabled, !activeSources.isEmpty else { return nil }
         let active = processes.filter(\.isOutputActive)
         let currentPIDs = Set(active.map(\.pid))
         let newlyActive = active.filter { !activeOutputPIDs.contains($0.pid) }
@@ -132,13 +212,19 @@ public final class ProtectionCoordinator {
             record(.audioProcessDetected, "合盖期间检测到音频输出进程：\(process.name)", process: process)
         }
 
-        guard !active.isEmpty else { return }
-        let outcome = perform(.reinforce)
-        publishReinforcement(outcome, successDetail: newlyActive.isEmpty ? nil : "检测到新的音频输出，已再次静音内建扬声器")
+        guard !active.isEmpty else { return nil }
+        return PreparedProtectionAction(
+            action: .reinforce,
+            completion: .reinforcement(
+                successDetail: newlyActive.isEmpty ? nil : "检测到新的音频输出，已再次静音内建扬声器",
+                chromeTab: nil,
+                correlation: .notApplicable
+            )
+        )
     }
 
-    public func receiveChromeEvidence(_ evidence: ChromeTabEvidence) {
-        guard isEnabled else { return }
+    private func prepareChromeEvidence(_ evidence: ChromeTabEvidence) -> PreparedProtectionAction? {
+        guard isEnabled else { return nil }
         let chromeProcess: AudioProcess?
         do {
             chromeProcess = try processEvidence.activeOutputProcesses().first {
@@ -160,70 +246,45 @@ public final class ProtectionCoordinator {
             correlation: correlation
         )
 
-        guard state == .protecting else { return }
-        let outcome = perform(.reinforce)
-        publishReinforcement(
-            outcome,
-            successDetail: "Chrome 标签页发声，已强制静音内建扬声器",
-            chromeTab: evidence,
-            correlation: correlation
+        guard state == .protecting else { return nil }
+        return PreparedProtectionAction(
+            action: .reinforce,
+            completion: .reinforcement(
+                successDetail: "Chrome 标签页发声，已强制静音内建扬声器",
+                chromeTab: evidence,
+                correlation: correlation
+            )
         )
     }
 
-    public func receiveAudioRouteChanged() {
-        guard isEnabled, !activeSources.isEmpty else { return }
-        let outcome = perform(.routeChangedWhileProtectionRequired(sources: activeSources))
-        state = beginState(for: outcome)
-        if state == .protecting {
-            record(.muteEnforced, "音频路由变化后已重新验证并保护内建扬声器")
-        } else {
-            record(.error, "音频路由变化后无法保护内建扬声器")
-        }
-    }
-
-    public func endProtectionForShutdown() -> SpeakerRecoveryOutcome {
-        let outcome = perform(.end)
-        activeSources.removeAll()
-        state = endState(for: outcome, readyState: isEnabled ? .armed : .inactive)
-        return outcome
-    }
-
-    private func updateProtectionSource(_ source: ProtectionSource, active: Bool) {
-        let wasProtected = !activeSources.isEmpty
-        if active {
-            guard activeSources.insert(source).inserted else { return }
-            guard !wasProtected else { return }
-            let outcome = perform(.begin(sources: activeSources))
+    private func complete(_ completion: ProtectionCompletion, outcome: SpeakerRecoveryOutcome) {
+        switch completion {
+        case .begin:
             state = beginState(for: outcome)
-            if state == .protecting {
-                record(.muteEnforced, "已静音内建扬声器")
-            } else {
-                record(.error, "无法启动扬声器保护")
+            record(state == .protecting ? .muteEnforced : .error,
+                   state == .protecting ? "已静音内建扬声器" : "无法启动扬声器保护")
+        case let .end(readyState, recordsRestored):
+            state = endState(for: outcome, readyState: readyState)
+            if recordsRestored {
+                record(state == readyState ? .restored : .error,
+                       state == readyState ? "已恢复内建扬声器保护前状态" : "无法恢复内建扬声器状态")
             }
-            return
+        case let .reinforcement(successDetail, chromeTab, correlation):
+            publishReinforcement(
+                outcome,
+                successDetail: successDetail,
+                chromeTab: chromeTab,
+                correlation: correlation
+            )
+        case .routeChanged:
+            state = beginState(for: outcome)
+            record(
+                state == .protecting ? .muteEnforced : .error,
+                state == .protecting
+                    ? "音频路由变化后已重新验证并保护内建扬声器"
+                    : "音频路由变化后无法保护内建扬声器"
+            )
         }
-
-        guard activeSources.remove(source) != nil, activeSources.isEmpty else { return }
-        let outcome = perform(.end)
-        state = endState(for: outcome, readyState: .armed)
-        if state == .armed {
-            record(.restored, "已恢复内建扬声器保护前状态")
-        } else {
-            record(.error, "无法恢复内建扬声器状态")
-        }
-    }
-
-    private func perform(_ action: SpeakerProtectionAction) -> SpeakerRecoveryOutcome {
-        let result = LockedRecoveryOutcome()
-        let semaphore = DispatchSemaphore(value: 0)
-        let protection = protection
-        Task.detached {
-            let outcome = await protection.apply(action)
-            result.set(outcome)
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return result.get()
     }
 
     private func beginState(for outcome: SpeakerRecoveryOutcome) -> ProtectionState {
@@ -306,32 +367,89 @@ public final class ProtectionCoordinator {
     }
 }
 
-private final class LockedRecoveryOutcome: @unchecked Sendable {
-    private let lock = NSLock()
-    private var outcome: SpeakerRecoveryOutcome?
+private enum ProtectionCoordinatorInput: Sendable {
+    case setEnabled(Bool)
+    case physicalLid(Bool)
+    case simulation(SimulationLidState)
+    case night(Bool)
+    case audioSnapshot([AudioProcess])
+    case chromeEvidence(ChromeTabEvidence)
+    case audioRouteChanged
+    case shutdown
+}
 
-    func set(_ outcome: SpeakerRecoveryOutcome) {
-        lock.lock()
-        self.outcome = outcome
-        lock.unlock()
+private struct PreparedProtectionAction {
+    let action: SpeakerProtectionAction
+    let completion: ProtectionCompletion
+}
+
+private enum ProtectionCompletion {
+    case begin
+    case end(readyState: ProtectionState, recordsRestored: Bool)
+    case reinforcement(
+        successDetail: String?,
+        chromeTab: ChromeTabEvidence?,
+        correlation: CorrelationStatus
+    )
+    case routeChanged
+}
+
+@MainActor
+public final class SimulationProtectionLifecycle<Protection: SpeakerProtectionApplying> {
+    private let coordinator: ProtectionCoordinator<Protection>
+
+    public init(coordinator: ProtectionCoordinator<Protection>) {
+        self.coordinator = coordinator
     }
 
-    func get() -> SpeakerRecoveryOutcome {
-        lock.lock()
-        defer { lock.unlock() }
-        return outcome ?? .failedSafetyUnknown
+    public func update(_ state: SimulationLidState) async {
+        await coordinator.receiveSimulation(state)
     }
 }
 
 @MainActor
-public final class SimulationProtectionLifecycle {
-    private let coordinator: ProtectionCoordinator
+extension SimulationProtectionLifecycle where Protection: SynchronousSpeakerProtectionApplying {
+    func update(_ state: SimulationLidState) {
+        coordinator.receiveSimulation(state)
+    }
+}
 
-    public init(coordinator: ProtectionCoordinator) {
-        self.coordinator = coordinator
+@MainActor
+extension ProtectionCoordinator where Protection: SynchronousSpeakerProtectionApplying {
+    func setEnabled(_ enabled: Bool) {
+        applySynchronously(.setEnabled(enabled))
     }
 
-    public func update(_ state: SimulationLidState) {
-        coordinator.receiveSimulation(state)
+    func receivePhysicalLid(closed: Bool) {
+        applySynchronously(.physicalLid(closed))
+    }
+
+    func receiveSimulation(_ simulation: SimulationLidState) {
+        applySynchronously(.simulation(simulation))
+    }
+
+    func receiveLidState(closed: Bool, simulated: Bool = false) {
+        applySynchronously(simulated ? .simulation(closed ? .closed : .opened) : .physicalLid(closed))
+    }
+
+    func receiveNightProtection(_ active: Bool) {
+        applySynchronously(.night(active))
+    }
+
+    func receiveAudioSnapshot(_ processes: [AudioProcess]) {
+        applySynchronously(.audioSnapshot(processes))
+    }
+
+    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) {
+        applySynchronously(.chromeEvidence(evidence))
+    }
+
+    func receiveAudioRouteChanged() {
+        applySynchronously(.audioRouteChanged)
+    }
+
+    private func applySynchronously(_ input: ProtectionCoordinatorInput) {
+        guard let prepared = prepare(input) else { return }
+        complete(prepared.completion, outcome: protection.applySynchronously(prepared.action))
     }
 }

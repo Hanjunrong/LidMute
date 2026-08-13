@@ -27,6 +27,42 @@ final class SharedOperationTimeline: @unchecked Sendable {
     }
 }
 
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    func get() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+actor DelayedProtectionApplying: SpeakerProtectionApplying {
+    let delay: Duration
+    private var started = false
+
+    init(delay: Duration) {
+        self.delay = delay
+    }
+
+    func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
+        started = true
+        try? await Task.sleep(for: delay)
+        return .noPendingRecovery
+    }
+
+    func waitUntilStarted() async {
+        while !started { await Task.yield() }
+    }
+}
+
 final class MemorySpeakerRecoveryStore: SpeakerRecoveryStoring, @unchecked Sendable {
     var loadResult: SpeakerRecoveryLoadResult
     var saveError: Error?
@@ -47,13 +83,18 @@ final class MemorySpeakerRecoveryStore: SpeakerRecoveryStoring, @unchecked Senda
     static func withPendingFixture(
         uid: String = "built-in-a",
         stage: SpeakerRecoveryStage = .protected,
+        originalState: AudioDeviceState = .init(
+            muted: false,
+            volume: 0.72,
+            usedVolumeFallback: false
+        ),
         timeline: SharedOperationTimeline? = nil
     ) -> MemorySpeakerRecoveryStore {
         let device = AudioDevice(id: 7, uid: uid, name: "MacBook Speakers", isBuiltIn: true)
         let snapshot = SpeakerRecoverySnapshot(
             transactionID: UUID(uuidString: "00000000-0000-0000-0000-000000000006")!,
             device: device,
-            originalState: AudioDeviceState(muted: false, volume: 0.72, usedVolumeFallback: false),
+            originalState: originalState,
             stage: stage,
             capturedAt: Date(timeIntervalSince1970: 1_723_500_000),
             sources: [.physicalLid],
@@ -214,7 +255,7 @@ struct OrderedProtectionFixture {
     let timeline: SharedOperationTimeline
     let audio: ScriptedAudioController
     let recoveryStore: MemorySpeakerRecoveryStore
-    let coordinator: ProtectionCoordinator
+    let coordinator: ProtectionCoordinator<SpeakerRecoveryRuntime>
 
     @MainActor
     init(journalFailure: Error? = nil) {
@@ -257,6 +298,30 @@ final class ControllableRecoveryRuntime: PendingSpeakerRecovering, @unchecked Se
     }
 }
 
+actor BlockingRouteRecoveryRuntime: PendingSpeakerRecovering {
+    private var callCount = 0
+    private var blockedContinuation: CheckedContinuation<SpeakerRecoveryOutcome, Never>?
+
+    func recoverPending() async -> SpeakerRecoveryOutcome {
+        callCount += 1
+        if callCount == 1 { return .waitingForMatchingDevice }
+        if callCount == 2 {
+            return await withCheckedContinuation { continuation in
+                blockedContinuation = continuation
+            }
+        }
+        return .restored
+    }
+
+    func observedCallCount() -> Int { callCount }
+
+    func resumeBlockedRoute(with outcome: SpeakerRecoveryOutcome) {
+        let continuation = blockedContinuation
+        blockedContinuation = nil
+        continuation?.resume(returning: outcome)
+    }
+}
+
 @MainActor
 final class MonitorSpy: ApplicationMonitoring {
     private(set) var startAllCount = 0
@@ -270,17 +335,52 @@ final class MonitorSpy: ApplicationMonitoring {
 
 @MainActor
 final class ShutdownSpy: ApplicationShuttingDown {
-    let result: ShutdownOutcome
+    private var results: [ShutdownOutcome]
     private(set) var callCount = 0
+    private(set) var cancelledAttemptCount = 0
 
     init(result: ShutdownOutcome) {
-        self.result = result
+        self.results = [result]
+    }
+
+    init(results: [ShutdownOutcome]) {
+        self.results = results
     }
 
     func shutdownAndRestore() async -> ShutdownOutcome {
         callCount += 1
         await Task.yield()
-        return result
+        if results.count > 1 { return results.removeFirst() }
+        return results.first ?? .safetyUnknown
+    }
+
+    func resumeAfterCancelledTermination() async {
+        cancelledAttemptCount += 1
+    }
+}
+
+@MainActor
+final class BlockingShutdownSpy: ApplicationShuttingDown {
+    private(set) var callCount = 0
+    private(set) var cancelledAttemptCount = 0
+    private var firstContinuation: CheckedContinuation<ShutdownOutcome, Never>?
+
+    func shutdownAndRestore() async -> ShutdownOutcome {
+        callCount += 1
+        guard callCount == 1 else { return .restored }
+        return await withCheckedContinuation { continuation in
+            firstContinuation = continuation
+        }
+    }
+
+    func resumeAfterCancelledTermination() async {
+        cancelledAttemptCount += 1
+    }
+
+    func finishFirst(with outcome: ShutdownOutcome) {
+        let continuation = firstContinuation
+        firstContinuation = nil
+        continuation?.resume(returning: outcome)
     }
 }
 
@@ -294,6 +394,18 @@ struct SystemTerminationTimeout: TerminationTiming {
     }
 }
 
+actor SequencedTerminationTiming: TerminationTiming {
+    private var callCount = 0
+
+    func wait(for duration: Duration) async {
+        callCount += 1
+        guard callCount > 1 else { return }
+        do {
+            try await Task.sleep(for: duration)
+        } catch {}
+    }
+}
+
 final class MemoryEventStore: EventStoring, @unchecked Sendable {
     private(set) var events: [LidMuteEvent] = []
 
@@ -302,7 +414,7 @@ final class MemoryEventStore: EventStoring, @unchecked Sendable {
     func clear() throws { events.removeAll() }
 }
 
-final class FakeAudioController: AudioControlling, SpeakerProtectionApplying, @unchecked Sendable {
+final class FakeAudioController: AudioControlling, SynchronousSpeakerProtectionApplying, @unchecked Sendable {
     var device = AudioDevice(id: 7, uid: "built-in-a", name: "MacBook Speakers", isBuiltIn: true)
     var capturedState = AudioDeviceState(muted: false, volume: 0.72, usedVolumeFallback: false)
     var enforceError: Error?
@@ -338,6 +450,10 @@ final class FakeAudioController: AudioControlling, SpeakerProtectionApplying, @u
     func activeOutputProcesses() throws -> [AudioProcess] { activeProcesses }
 
     func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
+        applySynchronously(action)
+    }
+
+    func applySynchronously(_ action: SpeakerProtectionAction) -> SpeakerRecoveryOutcome {
         switch action {
         case .begin, .reinforce, .routeChangedWhileProtectionRequired:
             do {

@@ -127,6 +127,10 @@ public actor SpeakerRecoveryRuntime: SpeakerProtectionApplying, PendingSpeakerRe
                 try recoveryStore.markFinalizingRestore(transactionID: snapshot.transactionID)
             }
 
+            guard audio.supportsWritableMute(on: device) else {
+                return keepFallbackDeviceSilent(device)
+            }
+
             try restore(snapshot.originalState, on: device)
             try recoveryStore.removeCompleted(transactionID: snapshot.transactionID)
             return .restored
@@ -136,26 +140,33 @@ public actor SpeakerRecoveryRuntime: SpeakerProtectionApplying, PendingSpeakerRe
     }
 
     private func restore(_ originalState: AudioDeviceState, on device: AudioDevice) throws {
-        if audio.supportsWritableMute(on: device) {
-            try audio.writeMuted(true, on: device)
-            let mutedState = try audio.readState(of: device)
-            guard mutedState.muted else { throw SpeakerRecoveryRuntimeError.verificationFailed }
+        try audio.writeMuted(true, on: device)
+        let mutedState = try audio.readState(of: device)
+        guard mutedState.muted else { throw SpeakerRecoveryRuntimeError.verificationFailed }
 
-            try audio.writeVolume(originalState.volume, on: device)
-            let volumeState = try audio.readState(of: device)
-            guard volumeState.muted, volumeState.volume == originalState.volume else {
-                throw SpeakerRecoveryRuntimeError.verificationFailed
-            }
+        try audio.writeVolume(originalState.volume, on: device)
+        let volumeState = try audio.readState(of: device)
+        guard volumeState.muted, volumeState.volume == originalState.volume else {
+            throw SpeakerRecoveryRuntimeError.verificationFailed
+        }
 
-            if !originalState.muted {
-                try audio.writeMuted(false, on: device)
-            }
-        } else {
-            try audio.writeVolume(originalState.volume, on: device)
+        if !originalState.muted {
+            try audio.writeMuted(false, on: device)
         }
 
         guard try audio.readState(of: device) == originalState else {
             throw SpeakerRecoveryRuntimeError.verificationFailed
+        }
+    }
+
+    private func keepFallbackDeviceSilent(_ device: AudioDevice) -> SpeakerRecoveryOutcome {
+        do {
+            try audio.writeVolume(0, on: device)
+            return isVerifiedSilent(try audio.readState(of: device))
+                ? .failedButVerifiedSilent
+                : .failedSafetyUnknown
+        } catch {
+            return .failedSafetyUnknown
         }
     }
 

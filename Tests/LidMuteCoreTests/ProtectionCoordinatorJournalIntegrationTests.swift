@@ -3,12 +3,34 @@ import XCTest
 
 @MainActor
 final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
+    // This fails if coordinator waits on a semaphore and blocks MainActor during speaker I/O.
+    func testProtectionTransitionYieldsMainActorWhileApplying() async {
+        let applying = DelayedProtectionApplying(delay: .milliseconds(100))
+        let audio = ScriptedAudioController()
+        let coordinator = ProtectionCoordinator(
+            protection: applying,
+            processEvidence: audio,
+            store: MemoryEventStore()
+        )
+        await coordinator.setEnabled(true)
+        let mainActorRan = LockedFlag()
+        let queued = Task.detached {
+            await applying.waitUntilStarted()
+            await MainActor.run { mainActorRan.set() }
+        }
+
+        await coordinator.receivePhysicalLid(closed: true)
+
+        XCTAssertTrue(mainActorRan.get())
+        await queued.value
+    }
+
     // This fails if the physical-lid path bypasses the durable recovery transaction.
     func testPhysicalLidPathJournalsBeforeActualAudioMutation() async throws {
         let fixture = OrderedProtectionFixture()
 
-        fixture.coordinator.setEnabled(true)
-        fixture.coordinator.receivePhysicalLid(closed: true)
+        await fixture.coordinator.setEnabled(true)
+        await fixture.coordinator.receivePhysicalLid(closed: true)
 
         let timeline = fixture.timeline.snapshot()
         XCTAssertLessThan(
@@ -22,8 +44,8 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
     func testJournalFailureThroughCoordinatorPerformsNoAudioMutation() async {
         let fixture = OrderedProtectionFixture(journalFailure: FakeRecoveryStoreError.diskFull)
 
-        fixture.coordinator.setEnabled(true)
-        fixture.coordinator.receivePhysicalLid(closed: true)
+        await fixture.coordinator.setEnabled(true)
+        await fixture.coordinator.receivePhysicalLid(closed: true)
 
         XCTAssertFalse(fixture.timeline.snapshot().contains { $0.hasPrefix("audio.write") })
         XCTAssertEqual(fixture.coordinator.state, .unavailable)
@@ -32,16 +54,16 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
     // This fails if simulation and night source transitions bypass begin/end recovery actions.
     func testSimulationAndNightTransitionsUseJournaledRuntime() async {
         let simulation = OrderedProtectionFixture()
-        simulation.coordinator.setEnabled(true)
-        simulation.coordinator.receiveSimulation(.closed)
-        simulation.coordinator.receiveSimulation(.opened)
+        await simulation.coordinator.setEnabled(true)
+        await simulation.coordinator.receiveSimulation(.closed)
+        await simulation.coordinator.receiveSimulation(.opened)
         XCTAssertEqual(simulation.recoveryStore.operations.filter { $0 == "save" }.count, 1)
         XCTAssertEqual(simulation.recoveryStore.operations.filter { $0 == "remove" }.count, 1)
 
         let night = OrderedProtectionFixture()
-        night.coordinator.setEnabled(true)
-        night.coordinator.receiveNightProtection(true)
-        night.coordinator.receiveNightProtection(false)
+        await night.coordinator.setEnabled(true)
+        await night.coordinator.receiveNightProtection(true)
+        await night.coordinator.receiveNightProtection(false)
         XCTAssertEqual(night.recoveryStore.operations.filter { $0 == "save" }.count, 1)
         XCTAssertEqual(night.recoveryStore.operations.filter { $0 == "remove" }.count, 1)
     }
@@ -49,12 +71,12 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
     // This fails if disabling with multiple active sources restores more than once or skips recovery.
     func testDisableEndsOneSharedJournaledProtectionTransaction() async {
         let fixture = OrderedProtectionFixture()
-        fixture.coordinator.setEnabled(true)
-        fixture.coordinator.receivePhysicalLid(closed: true)
-        fixture.coordinator.receiveSimulation(.closed)
-        fixture.coordinator.receiveNightProtection(true)
+        await fixture.coordinator.setEnabled(true)
+        await fixture.coordinator.receivePhysicalLid(closed: true)
+        await fixture.coordinator.receiveSimulation(.closed)
+        await fixture.coordinator.receiveNightProtection(true)
 
-        fixture.coordinator.setEnabled(false)
+        await fixture.coordinator.setEnabled(false)
 
         XCTAssertEqual(fixture.recoveryStore.operations.filter { $0 == "remove" }.count, 1)
         XCTAssertEqual(fixture.coordinator.state, .inactive)
@@ -63,8 +85,8 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
     // This fails if process/Chrome evidence performs a direct write or does not reinforce the journal UID.
     func testAudioAndChromeEvidenceReinforceThroughRuntime() async {
         let fixture = OrderedProtectionFixture()
-        fixture.coordinator.setEnabled(true)
-        fixture.coordinator.receivePhysicalLid(closed: true)
+        await fixture.coordinator.setEnabled(true)
+        await fixture.coordinator.receivePhysicalLid(closed: true)
         let initialWrites = fixture.audio.writtenDeviceUIDs.count
         let process = AudioProcess(
             pid: 42,
@@ -75,10 +97,23 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
             isOutputActive: true
         )
 
-        fixture.coordinator.receiveAudioSnapshot([process])
-        fixture.coordinator.receiveChromeEvidence(.fixture(audible: true, incognito: false))
+        await fixture.coordinator.receiveAudioSnapshot([process])
+        await fixture.coordinator.receiveChromeEvidence(.fixture(audible: true, incognito: false))
 
         XCTAssertGreaterThan(fixture.audio.writtenDeviceUIDs.count, initialWrites)
         XCTAssertTrue(fixture.audio.writtenDeviceUIDs.allSatisfy { $0 == "built-in-a" })
+    }
+
+    // This fails if a cancelled shutdown leaves the coordinator logically enabled while the UI is off.
+    func testShutdownEndsProtectionAndDisablesCoordinator() async {
+        let fixture = OrderedProtectionFixture()
+        await fixture.coordinator.setEnabled(true)
+        await fixture.coordinator.receivePhysicalLid(closed: true)
+
+        let outcome = await fixture.coordinator.endProtectionForShutdown()
+
+        XCTAssertEqual(outcome, .restored)
+        XCTAssertFalse(fixture.coordinator.isEnabled)
+        XCTAssertEqual(fixture.coordinator.state, .inactive)
     }
 }

@@ -15,6 +15,8 @@ public final class ApplicationLifecycleCoordinator {
     private let monitors: any ApplicationMonitoring
     private var hasStarted = false
     private var isStopped = false
+    private var routeRetryInProgress = false
+    private var routeRetryPending = false
 
     public init(
         recovery: any PendingSpeakerRecovering,
@@ -32,16 +34,31 @@ public final class ApplicationLifecycleCoordinator {
     }
 
     public func receiveAudioRouteChanged() async {
-        guard !isStopped,
-              case .recoveryBlocked(.waitingForMatchingDevice) = state else { return }
-        state = .recovering
-        await recoverAndPublish()
+        guard !isStopped else { return }
+        if routeRetryInProgress {
+            routeRetryPending = true
+            return
+        }
+        guard case .recoveryBlocked(.waitingForMatchingDevice) = state else { return }
+
+        routeRetryInProgress = true
+        defer { routeRetryInProgress = false }
+        repeat {
+            routeRetryPending = false
+            state = .recovering
+            await recoverAndPublish()
+        } while !isStopped && routeRetryPending && state != .ready
     }
 
     public func stop() {
         guard !isStopped else { return }
         isStopped = true
         monitors.stopAll()
+    }
+
+    public func resume() {
+        guard hasStarted else { return }
+        isStopped = false
     }
 
     private func recoverAndPublish() async {
@@ -73,6 +90,7 @@ public final class ApplicationLifecycleCoordinator {
 @MainActor
 public protocol ApplicationShuttingDown: AnyObject {
     func shutdownAndRestore() async -> ShutdownOutcome
+    func resumeAfterCancelledTermination() async
 }
 
 public protocol TerminationTiming: Sendable {
@@ -99,6 +117,7 @@ public final class ApplicationTerminationCoordinator {
     private let timeout: Duration
     private let timing: any TerminationTiming
     private var terminationTask: Task<TerminationDecision, Never>?
+    private var timedOutShutdownConvergenceTask: Task<Void, Never>?
 
     public init(
         shutdown: any ApplicationShuttingDown,
@@ -118,9 +137,14 @@ public final class ApplicationTerminationCoordinator {
         let shutdown = shutdown
         let timeout = timeout
         let timing = timing
+        let convergenceTask = timedOutShutdownConvergenceTask
         let task = Task<TerminationDecision, Never> { @MainActor [weak self] in
+            await convergenceTask?.value
+            let shutdownTask = Task { @MainActor in
+                await shutdown.shutdownAndRestore()
+            }
             let outcome = await Self.firstOutcome(
-                shutdown: shutdown,
+                shutdownTask: shutdownTask,
                 timeout: timeout,
                 timing: timing
             )
@@ -128,23 +152,36 @@ public final class ApplicationTerminationCoordinator {
             switch outcome {
             case .restored, .verifiedSilent:
                 return .allow
-            case .safetyUnknown, .timedOut:
+            case .safetyUnknown:
+                await shutdown.resumeAfterCancelledTermination()
+                return .cancel
+            case .timedOut:
+                let convergenceTask = Task { @MainActor [weak self] in
+                    _ = await shutdownTask.value
+                    await shutdown.resumeAfterCancelledTermination()
+                    self?.timedOutShutdownConvergenceTask = nil
+                }
+                self?.timedOutShutdownConvergenceTask = convergenceTask
                 return .cancel
             }
         }
         terminationTask = task
-        return await task.value
+        let decision = await task.value
+        if decision == .cancel {
+            terminationTask = nil
+        }
+        return decision
     }
 
     private static func firstOutcome(
-        shutdown: any ApplicationShuttingDown,
+        shutdownTask: Task<ShutdownOutcome, Never>,
         timeout: Duration,
         timing: any TerminationTiming
     ) async -> ShutdownOutcome {
         await withCheckedContinuation { continuation in
             let race = TerminationOutcomeRace(continuation: continuation)
             Task { @MainActor in
-                race.finish(await shutdown.shutdownAndRestore())
+                race.finish(await shutdownTask.value)
             }
             Task {
                 await timing.wait(for: timeout)
