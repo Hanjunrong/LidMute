@@ -5,12 +5,9 @@ public final class ProtectionCoordinator {
     public private(set) var state: ProtectionState = .inactive
     public private(set) var isEnabled = false
     public var onEvent: ((LidMuteEvent) -> Void)?
-    public var onMediaPauseRequest: ((MediaPauseRequest) -> Void)?
 
     private let audio: AudioControlling
     private let store: EventStoring
-    private let mediaPauseDebounce: TimeInterval
-    private let now: () -> Date
     private var savedState: AudioDeviceState?
     private var targetDevice: AudioDevice?
     private var disableRestoreState: AudioDeviceState?
@@ -19,19 +16,14 @@ public final class ProtectionCoordinator {
     private var observedLidClosed: Bool?
     private var activeOutputPIDs: Set<Int32> = []
     private var lastSilenceError: String?
-    private var lastMediaPauseRequestAt: Date?
     private var sequence: UInt64 = 0
 
     public init(
         audio: AudioControlling,
-        store: EventStoring,
-        mediaPauseDebounce: TimeInterval = 3,
-        now: @escaping () -> Date = Date.init
+        store: EventStoring
     ) {
         self.audio = audio
         self.store = store
-        self.mediaPauseDebounce = mediaPauseDebounce
-        self.now = now
     }
 
     public func setEnabled(_ enabled: Bool) {
@@ -41,14 +33,12 @@ public final class ProtectionCoordinator {
             restoreForGuardDisable()
             activeSources.removeAll()
             resetObservationState()
-            lastMediaPauseRequestAt = nil
             state = .inactive
             record(.protectionDisabled, "守卫已关闭")
         } else {
             clearCapturedState()
             activeSources.removeAll()
             resetObservationState()
-            lastMediaPauseRequestAt = nil
             state = .armed
             record(.protectionEnabled, "守卫已开启，等待合盖")
         }
@@ -64,10 +54,6 @@ public final class ProtectionCoordinator {
         if closed {
             record(simulated ? .simulation : .lidClosed, simulated ? "模拟合盖" : "检测到合盖")
             updateProtectionSource(.lid, active: true)
-            requestPauseForActiveChrome(
-                source: .lid,
-                trigger: simulated ? .simulatedLidProtectionStarted : .lidProtectionStarted
-            )
         } else {
             record(simulated ? .simulation : .lidOpened, simulated ? "模拟开盖" : "检测到开盖")
             updateProtectionSource(.lid, active: false)
@@ -78,9 +64,6 @@ public final class ProtectionCoordinator {
         guard isEnabled else { return }
         record(active ? .nightProtectionStarted : .nightProtectionEnded, active ? "进入夜间息屏静音时段" : "夜间息屏静音时段结束")
         updateProtectionSource(.night, active: active)
-        if active {
-            requestPauseForActiveChrome(source: .night, trigger: .nightProtectionStarted)
-        }
     }
 
     public func receiveAudioSnapshot(_ processes: [AudioProcess]) {
@@ -95,16 +78,6 @@ public final class ProtectionCoordinator {
 
         for process in newlyActive {
             record(.audioProcessDetected, "合盖期间检测到音频输出进程：\(process.name)", process: process)
-        }
-
-        for process in newlyActive where activeChromeProcess(in: [process]) != nil {
-            emitMediaPauseRequest(
-                trigger: .chromeAudioStarted,
-                source: nil,
-                process: process,
-                chromeTab: nil,
-                correlation: .systemMatched
-            )
         }
 
         if !active.isEmpty, let targetDevice {
@@ -141,43 +114,6 @@ public final class ProtectionCoordinator {
             }
         }
 
-        if state == .protecting, evidence.audible {
-            emitMediaPauseRequest(
-                trigger: .chromeAudioStarted,
-                source: nil,
-                process: chromeProcess,
-                chromeTab: evidence,
-                correlation: correlation
-            )
-        }
-    }
-
-    public func recordMediaPauseResult(_ request: MediaPauseRequest, errorDescription: String?) {
-        let sourceDetail: String
-        switch request.trigger {
-        case .lidProtectionStarted: sourceDetail = "真实合盖保护"
-        case .simulatedLidProtectionStarted: sourceDetail = "模拟合盖保护"
-        case .nightProtectionStarted: sourceDetail = "夜间息屏保护"
-        case .chromeAudioStarted: sourceDetail = "保护期间 Chrome 再次发声"
-        }
-
-        if let errorDescription {
-            record(
-                .mediaPauseRequestFailed,
-                "\(sourceDetail)：系统暂停请求失败：\(errorDescription)",
-                process: request.process,
-                chromeTab: request.chromeTab,
-                correlation: request.correlation
-            )
-        } else {
-            record(
-                .mediaPauseRequested,
-                "\(sourceDetail)：已发送系统暂停请求",
-                process: request.process,
-                chromeTab: request.chromeTab,
-                correlation: request.correlation
-            )
-        }
     }
 
     private func armAndMute() {
@@ -218,7 +154,6 @@ public final class ProtectionCoordinator {
         guard activeSources.remove(source) != nil, activeSources.isEmpty else {
             return
         }
-        lastMediaPauseRequestAt = nil
 
         if source == .lid {
             state = restoreForLidOpen() ? .armed : .unavailable
@@ -284,49 +219,6 @@ public final class ProtectionCoordinator {
         observedLidClosed = nil
         activeOutputPIDs.removeAll()
         lastSilenceError = nil
-    }
-
-    private func activeChromeProcess(in processes: [AudioProcess]) -> AudioProcess? {
-        processes.first {
-            $0.isOutputActive &&
-                ($0.bundleID?.localizedCaseInsensitiveContains("chrome") == true ||
-                 $0.name.localizedCaseInsensitiveContains("chrome"))
-        }
-    }
-
-    private func requestPauseForActiveChrome(source: ProtectionSource, trigger: MediaPauseTrigger) {
-        guard isEnabled, state == .protecting,
-              let processes = try? audio.activeOutputProcesses(),
-              let process = activeChromeProcess(in: processes) else { return }
-        emitMediaPauseRequest(
-            trigger: trigger,
-            source: source,
-            process: process,
-            chromeTab: nil,
-            correlation: .systemMatched
-        )
-    }
-
-    private func emitMediaPauseRequest(
-        trigger: MediaPauseTrigger,
-        source: ProtectionSource?,
-        process: AudioProcess?,
-        chromeTab: ChromeTabEvidence?,
-        correlation: CorrelationStatus
-    ) {
-        let timestamp = now()
-        if let lastMediaPauseRequestAt,
-           timestamp.timeIntervalSince(lastMediaPauseRequestAt) < mediaPauseDebounce { return }
-        lastMediaPauseRequestAt = timestamp
-        onMediaPauseRequest?(
-            MediaPauseRequest(
-                trigger: trigger,
-                source: source,
-                process: process,
-                chromeTab: chromeTab,
-                correlation: correlation
-            )
-        )
     }
 
     private func record(

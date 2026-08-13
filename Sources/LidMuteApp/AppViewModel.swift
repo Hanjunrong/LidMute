@@ -72,9 +72,6 @@ final class AppViewModel: ObservableObject {
             endMinutes: NightProtectionPreferences.minutes(from: nightConfiguration.endText) ?? 8 * 60
         )
         coordinator.onEvent = { [weak self] _ in self?.refresh() }
-        coordinator.onMediaPauseRequest = { [weak self] request in
-            self?.handleMediaPauseRequest(request)
-        }
         resolveChromeExtensionPath()
         refresh()
         checkChromeConnection()
@@ -262,17 +259,6 @@ final class AppViewModel: ObservableObject {
         case .previous: return "上一首"
         case .next: return "下一首"
         case .playPause: return "暂停/开始"
-        }
-    }
-
-    private func handleMediaPauseRequest(_ request: MediaPauseRequest) {
-        do {
-            try mediaController.send(.playPause)
-            mediaStatus = "已请求系统暂停"
-            coordinator.recordMediaPauseResult(request, errorDescription: nil)
-        } catch {
-            mediaStatus = "系统暂停请求失败：\(error.localizedDescription)"
-            coordinator.recordMediaPauseResult(request, errorDescription: error.localizedDescription)
         }
     }
 
