@@ -8,7 +8,7 @@ export SWIFTPM_CACHE_PATH="${TMPDIR:-/tmp}/lidmute-swiftpm-cache"
 scratch="${TMPDIR:-/tmp}/lidmute-build"
 
 swift build --disable-sandbox --scratch-path "$scratch"
-swift run --disable-sandbox --scratch-path "$scratch" LidMuteCoreBehaviorTests
+swift test --disable-sandbox --scratch-path "$scratch"
 node --test ChromeExtension/service-worker.test.mjs
 bin_path="$(swift build --disable-sandbox --scratch-path "$scratch" --show-bin-path)"
 test -x "$bin_path/LidMuteApp"

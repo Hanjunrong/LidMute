@@ -7,16 +7,15 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .library(name: "LidMuteCore", targets: ["LidMuteCore"]),
-        .executable(name: "LidMuteCoreBehaviorTests", targets: ["LidMuteCoreBehaviorTests"]),
         .executable(name: "LidMuteApp", targets: ["LidMuteApp"]),
         .executable(name: "LidMuteNativeHost", targets: ["LidMuteNativeHost"]),
     ],
     targets: [
         .target(name: "LidMuteCore"),
-        .executableTarget(
-            name: "LidMuteCoreBehaviorTests",
+        .testTarget(
+            name: "LidMuteCoreTests",
             dependencies: ["LidMuteCore"],
-            path: "Tests/LidMuteCoreBehavior"
+            path: "Tests/LidMuteCoreTests"
         ),
         .executableTarget(
             name: "LidMuteApp",
