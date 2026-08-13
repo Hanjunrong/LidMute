@@ -59,4 +59,18 @@ final class ProtectionSourceStateTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .inactive)
         XCTAssertEqual(audio.mutations.filter { $0.hasPrefix("restore:") }.count, 1)
     }
+
+    // This fails if disable clears a simulated closure before the next enable.
+    func testEnablingReplaysSimulatedClosedStateAfterDisable() {
+        let audio = FakeAudioController()
+        let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+
+        coordinator.setEnabled(true)
+        coordinator.receiveSimulation(.closed)
+        coordinator.setEnabled(false)
+        coordinator.setEnabled(true)
+
+        XCTAssertEqual(coordinator.state, .protecting)
+        XCTAssertEqual(audio.mutations.filter { $0.hasPrefix("silence:") }.count, 2)
+    }
 }

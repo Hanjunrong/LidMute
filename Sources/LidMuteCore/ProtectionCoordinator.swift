@@ -33,15 +33,19 @@ public final class ProtectionCoordinator {
         if !enabled {
             restoreForGuardDisable()
             activeSources.removeAll()
-            resetObservationState()
+            resetObservationState(preservingSimulation: true)
             state = .inactive
             record(.protectionDisabled, "守卫已关闭")
         } else {
+            let simulationToReplay = observedSimulation
             clearCapturedState()
             activeSources.removeAll()
             resetObservationState()
             state = .armed
             record(.protectionEnabled, "守卫已开启，等待合盖")
+            if simulationToReplay == .closed {
+                receiveSimulation(.closed)
+            }
         }
     }
 
@@ -62,7 +66,10 @@ public final class ProtectionCoordinator {
     }
 
     public func receiveSimulation(_ simulation: SimulationLidState) {
-        guard isEnabled else { return }
+        guard isEnabled else {
+            observedSimulation = simulation == .reset ? nil : simulation
+            return
+        }
         guard simulation == .reset || observedSimulation != simulation else { return }
 
         switch simulation {
@@ -250,9 +257,11 @@ public final class ProtectionCoordinator {
         disableRestoreDevice = nil
     }
 
-    private func resetObservationState() {
+    private func resetObservationState(preservingSimulation: Bool = false) {
         observedPhysicalLidClosed = nil
-        observedSimulation = nil
+        if !preservingSimulation {
+            observedSimulation = nil
+        }
         activeOutputPIDs.removeAll()
         lastSilenceError = nil
     }

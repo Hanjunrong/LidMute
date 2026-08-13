@@ -69,3 +69,62 @@ Implementation commit recorded after this report using the Task 3-required messa
 ## Concerns
 
 None.
+
+## Review Fix Round 1
+
+### Finding addressed
+
+Re-enabling the guard after a simulated closure could leave the coordinator armed: disabling cleared the simulation observation and source, while the UI remained simulated-closed and would not submit a duplicate close event.
+
+### RED
+
+Command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review-swiftpm-module-cache \
+swift test --filter ProtectionSourceStateTests.testEnablingReplaysSimulatedClosedStateObservedWhileDisabled
+```
+
+Observed: exit 1; the new lifecycle regression failed as expected with coordinator state `armed` rather than `protecting`, and zero silence mutations rather than one.
+
+### GREEN
+
+The regression now exercises the user-visible lifecycle: simulated close, disable, then enable. The coordinator retains only the simulation observation across disable, clears its active source, and replays a retained `.closed` observation after enable. It also records simulation input while disabled, covering a user choosing simulated close before enabling.
+
+Focused lifecycle command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review-swiftpm-module-cache \
+swift test --filter ProtectionSourceStateTests.testEnablingReplaysSimulatedClosedStateAfterDisable
+```
+
+Observed: exit 0; 1 test executed, 0 failures.
+
+Covering matrix command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review-swiftpm-module-cache \
+swift test --filter ProtectionSourceStateTests
+```
+
+Observed: exit 0; 6 tests executed, 0 failures.
+
+Full command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review-swiftpm-module-cache \
+swift test
+```
+
+Observed: exit 0; 34 tests executed, 0 failures.
+
+### Review self-check
+
+- The lifecycle test fails if the simulation observation is cleared on disable, or if enable does not replay `.closed`.
+- Disable still clears every active source and restores exactly once; it preserves only the UI-owned simulation observation needed for reactivation.
+- Physical lid and night observations remain unchanged; no deferred Minor finding was addressed.
+- `git diff --check` passed.
