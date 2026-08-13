@@ -73,4 +73,20 @@ final class ProtectionSourceStateTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .protecting)
         XCTAssertEqual(audio.mutations.filter { $0.hasPrefix("silence:") }.count, 2)
     }
+
+    // This fails if a reset event is dropped while the guard is disabled.
+    func testLifecycleRouterDeliversDisabledResetBeforeReenable() {
+        let audio = FakeAudioController()
+        let coordinator = ProtectionCoordinator(audio: audio, store: MemoryEventStore())
+        let lifecycle = SimulationProtectionLifecycle(coordinator: coordinator)
+
+        coordinator.setEnabled(true)
+        lifecycle.update(.closed)
+        coordinator.setEnabled(false)
+        lifecycle.update(.reset)
+        coordinator.setEnabled(true)
+
+        XCTAssertEqual(coordinator.state, .armed)
+        XCTAssertEqual(audio.mutations.filter { $0.hasPrefix("silence:") }.count, 1)
+    }
 }

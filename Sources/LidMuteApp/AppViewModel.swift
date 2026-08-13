@@ -38,6 +38,7 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var chromeExtensionPath = ""
 
     private let coordinator: ProtectionCoordinator
+    private lazy var simulationProtectionLifecycle = SimulationProtectionLifecycle(coordinator: coordinator)
     private let store: JSONLineEventStore
     private let applicationSupport: URL
     private let inboxURL: URL
@@ -141,20 +142,20 @@ final class AppViewModel: ObservableObject {
     func simulateLidClosed() {
         guard simulatedLidState != .closed else { return }
         simulatedLidState = .closed
-        coordinator.receiveSimulation(.closed)
+        simulationProtectionLifecycle.update(.closed)
         refresh()
     }
 
     func simulateLidOpened() {
         guard simulatedLidState != .opened else { return }
         simulatedLidState = .opened
-        coordinator.receiveSimulation(.opened)
+        simulationProtectionLifecycle.update(.opened)
         refresh()
     }
 
     func resetSimulationState() {
         simulatedLidState = .opened
-        if isEnabled { coordinator.receiveSimulation(.reset) }
+        simulationProtectionLifecycle.update(.reset)
         refresh()
     }
 

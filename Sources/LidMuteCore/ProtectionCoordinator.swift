@@ -279,3 +279,16 @@ public final class ProtectionCoordinator {
         onEvent?(event)
     }
 }
+
+@MainActor
+public final class SimulationProtectionLifecycle {
+    private let coordinator: ProtectionCoordinator
+
+    public init(coordinator: ProtectionCoordinator) {
+        self.coordinator = coordinator
+    }
+
+    public func update(_ state: SimulationLidState) {
+        coordinator.receiveSimulation(state)
+    }
+}

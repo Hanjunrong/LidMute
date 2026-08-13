@@ -62,6 +62,67 @@ Observed: exit 0; 33 tests executed, 0 failures.
 - System callbacks and simulation controls use the new explicit APIs; manual `MediaCommand` behavior and app visual layout are untouched.
 - `git diff --check` passed.
 
+## Review Fix Round 2
+
+### Finding addressed
+
+Resetting the simulation while the guard was disabled updated the UI state but was not sent to the coordinator. The retained simulated-closed observation could therefore be replayed at the next enable.
+
+### RED
+
+An initial direct `AppViewModel` test was intentionally discarded: the Core test target cannot link the `LidMuteApp` executable target, and changing package target architecture was outside Task 3 scope. The final RED exercises the extracted Core lifecycle boundary used by all App simulation actions.
+
+Command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review2-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review2-swiftpm-module-cache \
+swift test --filter ProtectionSourceStateTests.testLifecycleRouterDeliversDisabledResetBeforeReenable
+```
+
+Observed: exit 1 at compile time as expected; `SimulationProtectionLifecycle` was not in scope. This test names the missing lifecycle boundary whose required behavior is that `.reset` reaches the coordinator while disabled, so re-enable remains armed.
+
+### GREEN
+
+Added a small Core `SimulationProtectionLifecycle` that unconditionally routes each simulation state to the coordinator. `AppViewModel` now uses that single lifecycle route for close, open, and reset; reset has no guard-enabled condition.
+
+Focused command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review2-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review2-swiftpm-module-cache \
+swift test --filter ProtectionSourceStateTests.testLifecycleRouterDeliversDisabledResetBeforeReenable
+```
+
+Observed: exit 0; 1 test executed, 0 failures.
+
+Covering matrix command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review2-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review2-swiftpm-module-cache \
+swift test --filter ProtectionSourceStateTests
+```
+
+Observed: exit 0; 7 tests executed, 0 failures.
+
+Full command:
+
+```bash
+CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task3-review2-clang-module-cache \
+SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task3-review2-swiftpm-module-cache \
+swift test
+```
+
+Observed: exit 0; 35 tests executed, 0 failures.
+
+### Review self-check
+
+- The lifecycle regression fails if reset is dropped while disabled, because re-enable would replay the retained closure and become protecting.
+- App simulation close/open/reset all use the same Core lifecycle route; reset is unconditional.
+- No package architecture change or deferred Minor finding was included.
+- `git diff --check` passed.
+
 ## Commit
 
 Implementation commit recorded after this report using the Task 3-required message and OMC trailers.
