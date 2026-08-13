@@ -55,7 +55,7 @@ Available verification:
 
 ## Commit
 
-`67840be` (`test: adopt standard SwiftPM test target`)
+Implementation commit: `a35408a` (`test: adopt standard SwiftPM test target`).
 
 ## Concern
 
