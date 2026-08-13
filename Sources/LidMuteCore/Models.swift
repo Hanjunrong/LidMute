@@ -220,14 +220,13 @@ public enum SpeakerRecoveryOutcome: Equatable, Sendable {
 
 public enum AppLifecycleState: Equatable, Sendable {
     case recovering
+    case shutdownUnresolved
     case ready
     case recoveryBlocked(SpeakerRecoveryOutcome)
 }
 
-public enum ShutdownOutcome: Equatable, Sendable {
-    case restored
-    case verifiedSilent
-    case safetyUnknown
+public enum ApplicationShutdownResult: Equatable, Sendable {
+    case recovery(SpeakerRecoveryOutcome)
     case timedOut
 }
 

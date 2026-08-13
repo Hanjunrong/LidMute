@@ -111,13 +111,40 @@ final class ApplicationLifecycleCoordinatorTests: XCTestCase {
         XCTAssertEqual(monitors.startAllCount, 0)
         XCTAssertEqual(monitors.startRouteOnlyCount, 0)
     }
+
+    func testResumeAfterShutdownUsesActualRecoveryOutcomeForMonitorPolicy() async {
+        for (outcome, expectedAll, expectedRoute) in [
+            (SpeakerRecoveryOutcome.restored, 2, 0),
+            (.waitingForMatchingDevice, 1, 1),
+            (.corruptSnapshot, 1, 0),
+            (.unsupportedSnapshot(9), 1, 0),
+            (.failedButVerifiedSilent, 1, 0),
+            (.failedSafetyUnknown, 1, 0),
+        ] {
+            let recovery = ControllableRecoveryRuntime(result: .restored)
+            let monitors = MonitorSpy()
+            let lifecycle = ApplicationLifecycleCoordinator(recovery: recovery, monitors: monitors)
+            await lifecycle.start()
+            lifecycle.stop()
+
+            lifecycle.resume(after: outcome)
+
+            XCTAssertEqual(monitors.startAllCount, expectedAll, "outcome: \(outcome)")
+            XCTAssertEqual(monitors.startRouteOnlyCount, expectedRoute, "outcome: \(outcome)")
+            XCTAssertEqual(
+                lifecycle.state,
+                outcome == .restored ? .ready : .recoveryBlocked(outcome),
+                "outcome: \(outcome)"
+            )
+        }
+    }
 }
 
 @MainActor
 final class ApplicationTerminationCoordinatorTests: XCTestCase {
     // This fails if repeated AppKit termination requests launch separate restoration transactions.
     func testRepeatedTerminationRequestsShareOneShutdown() async {
-        let shutdown = ShutdownSpy(result: .restored)
+        let shutdown = ShutdownSpy(result: .recovery(.restored))
         let coordinator = ApplicationTerminationCoordinator(
             shutdown: shutdown,
             timeout: .seconds(5),
@@ -135,7 +162,7 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
     // This fails if a verified-silent shutdown is treated as unsafe to terminate.
     func testVerifiedSilentAllowsTermination() async {
         let coordinator = ApplicationTerminationCoordinator(
-            shutdown: ShutdownSpy(result: .verifiedSilent),
+            shutdown: ShutdownSpy(result: .recovery(.failedButVerifiedSilent)),
             timeout: .seconds(5),
             timing: SystemTerminationTimeout()
         )
@@ -145,31 +172,35 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
 
     // This fails if an unknown speaker state permits ordinary process termination.
     func testSafetyUnknownCancelsTermination() async {
+        let shutdown = ShutdownSpy(result: .recovery(.corruptSnapshot))
         let coordinator = ApplicationTerminationCoordinator(
-            shutdown: ShutdownSpy(result: .safetyUnknown),
+            shutdown: shutdown,
             timeout: .seconds(5),
             timing: SystemTerminationTimeout()
         )
         let decision = await coordinator.requestTermination()
         XCTAssertEqual(decision, .cancel)
+        XCTAssertEqual(coordinator.lastOutcome, .recovery(.corruptSnapshot))
+        XCTAssertEqual(shutdown.resumedResults, [.recovery(.corruptSnapshot)])
     }
 
     // This fails if the timeout path waits indefinitely or permits termination.
     func testTimeoutCancelsTerminationWithTypedOutcome() async {
+        let shutdown = ShutdownSpy(result: .recovery(.restored))
         let coordinator = ApplicationTerminationCoordinator(
-            shutdown: ShutdownSpy(result: .restored),
+            shutdown: shutdown,
             timeout: .seconds(5),
             timing: ImmediateTerminationTimeout()
         )
 
         let decision = await coordinator.requestTermination()
         XCTAssertEqual(decision, .cancel)
-        XCTAssertEqual(coordinator.lastOutcome, .timedOut)
+        XCTAssertEqual(shutdown.resumedResults.first, .timedOut)
     }
 
     // This fails if a safety-unknown cancellation is cached and blocks a later successful retry.
     func testSafetyUnknownCancellationAllowsLaterSuccessfulAttempt() async {
-        let shutdown = ShutdownSpy(results: [.safetyUnknown, .restored])
+        let shutdown = ShutdownSpy(results: [.recovery(.failedSafetyUnknown), .recovery(.restored)])
         let coordinator = ApplicationTerminationCoordinator(
             shutdown: shutdown,
             timeout: .seconds(5),
@@ -186,7 +217,7 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
 
     // This fails if a timed-out attempt remains cached instead of permitting a fresh shutdown.
     func testTimeoutCancellationAllowsLaterSuccessfulAttempt() async {
-        let shutdown = ShutdownSpy(results: [.restored, .restored])
+        let shutdown = ShutdownSpy(results: [.recovery(.restored), .recovery(.restored)])
         let coordinator = ApplicationTerminationCoordinator(
             shutdown: shutdown,
             timeout: .seconds(5),
@@ -198,7 +229,7 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
 
         XCTAssertEqual([first, second], [.cancel, .allow])
         XCTAssertEqual(shutdown.callCount, 2)
-        XCTAssertEqual(shutdown.cancelledAttemptCount, 1)
+        XCTAssertEqual(shutdown.cancelledAttemptCount, 2)
     }
 
     // This fails if timeout resumes monitoring or starts a second shutdown before the first one converges.
@@ -212,18 +243,20 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
 
         let firstDecision = await coordinator.requestTermination()
         XCTAssertEqual(firstDecision, .cancel)
-        XCTAssertEqual(shutdown.cancelledAttemptCount, 0)
+        XCTAssertEqual(shutdown.cancelledAttemptCount, 1)
 
         let retryDecision = await coordinator.requestTermination()
         XCTAssertEqual(retryDecision, .cancel)
         XCTAssertEqual(shutdown.callCount, 1)
 
-        shutdown.finishFirst(with: .restored)
-        while shutdown.cancelledAttemptCount == 0 { await Task.yield() }
+        shutdown.finishFirst(with: .recovery(.restored))
+        while shutdown.cancelledAttemptCount < 2 { await Task.yield() }
+        XCTAssertEqual(coordinator.lastOutcome, .recovery(.restored))
+        XCTAssertEqual(shutdown.resumedResults, [.timedOut, .recovery(.restored)])
         let freshDecision = await coordinator.requestTermination()
         XCTAssertEqual(freshDecision, .allow)
         XCTAssertEqual(shutdown.callCount, 2)
-        XCTAssertEqual(shutdown.cancelledAttemptCount, 1)
+        XCTAssertEqual(shutdown.cancelledAttemptCount, 2)
     }
 
     // This fails if concurrent retries during convergence create any new shutdown attempt.
@@ -242,7 +275,7 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
         await Task.yield()
         XCTAssertEqual(shutdown.callCount, 1)
 
-        shutdown.finishFirst(with: .restored)
+        shutdown.finishFirst(with: .recovery(.restored))
         let retryDecisions = await [firstRetry, secondRetry]
         XCTAssertEqual(retryDecisions, [.cancel, .cancel])
         XCTAssertEqual(shutdown.callCount, 1)
@@ -271,7 +304,7 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
         XCTAssertEqual(observedRetry, .cancel)
         XCTAssertEqual(shutdown.callCount, 1)
 
-        shutdown.finishFirst(with: .restored)
+        shutdown.finishFirst(with: .recovery(.restored))
         _ = await retry.value
         while shutdown.cancelledAttemptCount == 0 { await Task.yield() }
     }

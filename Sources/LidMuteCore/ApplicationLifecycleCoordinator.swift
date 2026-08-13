@@ -57,19 +57,27 @@ public final class ApplicationLifecycleCoordinator {
         guard !isStopped else { return }
         isStopped = true
         recoveryGeneration += 1
-        if state == .recovering { recoveryRestartPending = true }
+        if state == .recovering || state == .shutdownUnresolved { recoveryRestartPending = true }
         monitors.stopAll()
     }
 
     public func resume() {
         guard hasStarted else { return }
         isStopped = false
-        guard state == .recovering else { return }
+        guard state == .recovering || state == .shutdownUnresolved else { return }
         recoveryRestartPending = true
         guard !recoveryInProgress else { return }
         Task { @MainActor [weak self] in
             await self?.recoverAndPublish()
         }
+    }
+
+    public func resume(after outcome: SpeakerRecoveryOutcome) {
+        guard hasStarted else { return }
+        isStopped = false
+        recoveryRestartPending = false
+        state = .recovering
+        publishRecovery(outcome)
     }
 
     private func recoverAndPublish() async {
@@ -118,8 +126,8 @@ public final class ApplicationLifecycleCoordinator {
 
 @MainActor
 public protocol ApplicationShuttingDown: AnyObject {
-    func shutdownAndRestore() async -> ShutdownOutcome
-    func resumeAfterCancelledTermination() async
+    func shutdownAndRestore() async -> ApplicationShutdownResult
+    func resumeAfterCancelledTermination(_ result: ApplicationShutdownResult) async
 }
 
 public protocol TerminationTiming: Sendable {
@@ -140,7 +148,7 @@ public struct ContinuousTerminationTiming: TerminationTiming {
 
 @MainActor
 public final class ApplicationTerminationCoordinator {
-    public private(set) var lastOutcome: ShutdownOutcome?
+    public private(set) var lastOutcome: ApplicationShutdownResult?
 
     private let shutdown: any ApplicationShuttingDown
     private let timeout: Duration
@@ -181,15 +189,18 @@ public final class ApplicationTerminationCoordinator {
             )
             self?.lastOutcome = outcome
             switch outcome {
-            case .restored, .verifiedSilent:
+            case .recovery(.noPendingRecovery), .recovery(.restored),
+                 .recovery(.failedButVerifiedSilent):
                 return .allow
-            case .safetyUnknown:
-                await shutdown.resumeAfterCancelledTermination()
+            case .recovery:
+                await shutdown.resumeAfterCancelledTermination(outcome)
                 return .cancel
             case .timedOut:
+                await shutdown.resumeAfterCancelledTermination(.timedOut)
                 let convergenceTask = Task { @MainActor [weak self] in
-                    _ = await shutdownTask.value
-                    await shutdown.resumeAfterCancelledTermination()
+                    let converged = await shutdownTask.value
+                    self?.lastOutcome = converged
+                    await shutdown.resumeAfterCancelledTermination(converged)
                     self?.timedOutShutdownConvergenceTask = nil
                 }
                 self?.timedOutShutdownConvergenceTask = convergenceTask
@@ -205,10 +216,10 @@ public final class ApplicationTerminationCoordinator {
     }
 
     private static func firstOutcome(
-        shutdownTask: Task<ShutdownOutcome, Never>,
+        shutdownTask: Task<ApplicationShutdownResult, Never>,
         timeout: Duration,
         timing: any TerminationTiming
-    ) async -> ShutdownOutcome {
+    ) async -> ApplicationShutdownResult {
         await withCheckedContinuation { continuation in
             let race = TerminationOutcomeRace(continuation: continuation)
             Task { @MainActor in
@@ -224,13 +235,13 @@ public final class ApplicationTerminationCoordinator {
 
 private final class TerminationOutcomeRace: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<ShutdownOutcome, Never>?
+    private var continuation: CheckedContinuation<ApplicationShutdownResult, Never>?
 
-    init(continuation: CheckedContinuation<ShutdownOutcome, Never>) {
+    init(continuation: CheckedContinuation<ApplicationShutdownResult, Never>) {
         self.continuation = continuation
     }
 
-    func finish(_ outcome: ShutdownOutcome) {
+    func finish(_ outcome: ApplicationShutdownResult) {
         lock.lock()
         let continuation = self.continuation
         self.continuation = nil

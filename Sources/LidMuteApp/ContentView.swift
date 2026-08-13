@@ -129,18 +129,27 @@ private struct GuardHero: View {
         AmberVisualTheme.palette(for: colorScheme)
     }
 
+    private var presentation: GuardHeroPresentation {
+        GuardHeroPresentation(
+            lifecycleState: model.lifecycleState,
+            isEnabled: model.isEnabled,
+            isNightProtectionActive: model.isNightProtectionActive,
+            statusText: model.statusText
+        )
+    }
+
     var body: some View {
         HStack(spacing: 24) {
             VStack(alignment: .leading, spacing: 9) {
-                Label(model.isEnabled ? "守卫已开启" : "守卫未开启", systemImage: model.isEnabled ? "shield.fill" : "shield.slash")
+                Label(presentation.eyebrow, systemImage: model.isEnabled ? "shield.fill" : "shield.slash")
                     .font(ControlCenterTypography.heroEyebrow)
                     .foregroundStyle(model.isEnabled ? AmberVisualTheme.amber : palette.secondaryText)
 
-                Text(heroTitle)
+                Text(presentation.title)
                     .font(ControlCenterTypography.heroTitle)
                     .tracking(-0.65)
 
-                Text(heroSubtitle)
+                Text(presentation.subtitle)
                     .font(ControlCenterTypography.body)
                     .foregroundStyle(palette.secondaryText)
 
@@ -177,24 +186,13 @@ private struct GuardHero: View {
                     shape: .capsule
                 )
             )
+            .disabled(!presentation.canToggleGuard)
         }
         .frame(maxHeight: .infinity)
         .padding(10)
         .amberGlassCard(role: .hero, padding: 0, cornerRadius: 14)
     }
 
-    private var heroTitle: String {
-        if !model.isEnabled { return "安静由你决定" }
-        if model.isNightProtectionActive { return "夜间模式正在保护外放" }
-        if model.statusText.contains("正在保护") { return "外放安静，一切正常" }
-        return "等待合盖或夜间息屏"
-    }
-
-    private var heroSubtitle: String {
-        model.isEnabled
-            ? "只控制 Mac 内建扬声器，耳机与外接音频不会被修改。"
-            : "开启后，只有合盖或夜间息屏策略会触发静音。"
-    }
 }
 
 private struct MetricPill: View {

@@ -340,27 +340,29 @@ final class MonitorSpy: ApplicationMonitoring {
 
 @MainActor
 final class ShutdownSpy: ApplicationShuttingDown {
-    private var results: [ShutdownOutcome]
+    private var results: [ApplicationShutdownResult]
     private(set) var callCount = 0
     private(set) var cancelledAttemptCount = 0
+    private(set) var resumedResults: [ApplicationShutdownResult] = []
 
-    init(result: ShutdownOutcome) {
+    init(result: ApplicationShutdownResult) {
         self.results = [result]
     }
 
-    init(results: [ShutdownOutcome]) {
+    init(results: [ApplicationShutdownResult]) {
         self.results = results
     }
 
-    func shutdownAndRestore() async -> ShutdownOutcome {
+    func shutdownAndRestore() async -> ApplicationShutdownResult {
         callCount += 1
         await Task.yield()
         if results.count > 1 { return results.removeFirst() }
-        return results.first ?? .safetyUnknown
+        return results.first ?? .recovery(.failedSafetyUnknown)
     }
 
-    func resumeAfterCancelledTermination() async {
+    func resumeAfterCancelledTermination(_ result: ApplicationShutdownResult) async {
         cancelledAttemptCount += 1
+        resumedResults.append(result)
     }
 }
 
@@ -368,21 +370,23 @@ final class ShutdownSpy: ApplicationShuttingDown {
 final class BlockingShutdownSpy: ApplicationShuttingDown {
     private(set) var callCount = 0
     private(set) var cancelledAttemptCount = 0
-    private var firstContinuation: CheckedContinuation<ShutdownOutcome, Never>?
+    private(set) var resumedResults: [ApplicationShutdownResult] = []
+    private var firstContinuation: CheckedContinuation<ApplicationShutdownResult, Never>?
 
-    func shutdownAndRestore() async -> ShutdownOutcome {
+    func shutdownAndRestore() async -> ApplicationShutdownResult {
         callCount += 1
-        guard callCount == 1 else { return .restored }
+        guard callCount == 1 else { return .recovery(.restored) }
         return await withCheckedContinuation { continuation in
             firstContinuation = continuation
         }
     }
 
-    func resumeAfterCancelledTermination() async {
+    func resumeAfterCancelledTermination(_ result: ApplicationShutdownResult) async {
         cancelledAttemptCount += 1
+        resumedResults.append(result)
     }
 
-    func finishFirst(with outcome: ShutdownOutcome) {
+    func finishFirst(with outcome: ApplicationShutdownResult) {
         let continuation = firstContinuation
         firstContinuation = nil
         continuation?.resume(returning: outcome)

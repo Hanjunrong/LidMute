@@ -176,9 +176,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         routeChangePending = false
     }
 
-    func shutdownAndRestore() async -> ShutdownOutcome {
+    func shutdownAndRestore() async -> ApplicationShutdownResult {
         guard !isShuttingDown else {
-            return mapShutdownOutcome(await recoveryRuntime.recoverPending())
+            return .recovery(await recoveryRuntime.recoverPending())
         }
         isShuttingDown = true
         lifecycleCoordinator.stop()
@@ -188,28 +188,20 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         let outcome = await coordinator.endProtectionForShutdown()
         isEnabled = false
         refresh()
-        return mapShutdownOutcome(outcome)
+        return .recovery(outcome)
     }
 
-    func resumeAfterCancelledTermination() async {
+    func resumeAfterCancelledTermination(_ result: ApplicationShutdownResult) async {
+        if result == .timedOut {
+            lifecycleState = .shutdownUnresolved
+            refresh()
+            return
+        }
         isShuttingDown = false
         routeChangeTask = nil
-        lifecycleCoordinator.resume()
-        switch lifecycleState {
-        case .ready:
-            do {
-                try startAll()
-            } catch {
-                lifecycleState = .recoveryBlocked(.failedSafetyUnknown)
-            }
-        case .recoveryBlocked(.waitingForMatchingDevice):
-            do {
-                try startRouteOnly()
-            } catch {
-                lifecycleState = .recoveryBlocked(.failedSafetyUnknown)
-            }
-        case .recovering, .recoveryBlocked:
-            break
+        if case let .recovery(outcome) = result {
+            lifecycleCoordinator.resume(after: outcome)
+            lifecycleState = lifecycleCoordinator.state
         }
         refresh()
     }
@@ -542,6 +534,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         case .recovering:
             statusText = "正在恢复内建扬声器安全状态"
             return
+        case .shutdownUnresolved:
+            statusText = "关机恢复仍在进行，守卫操作已暂时停用"
+            return
         case let .recoveryBlocked(outcome):
             statusText = recoveryBlockedStatus(outcome)
             return
@@ -609,15 +604,4 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
     }
 
-    private func mapShutdownOutcome(_ outcome: SpeakerRecoveryOutcome) -> ShutdownOutcome {
-        switch outcome {
-        case .noPendingRecovery, .restored:
-            return .restored
-        case .failedButVerifiedSilent:
-            return .verifiedSilent
-        case .waitingForMatchingDevice, .corruptSnapshot,
-             .unsupportedSnapshot, .failedSafetyUnknown:
-            return .safetyUnknown
-        }
-    }
 }
