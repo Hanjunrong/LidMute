@@ -17,6 +17,9 @@ public final class ApplicationLifecycleCoordinator {
     private var isStopped = false
     private var routeRetryInProgress = false
     private var routeRetryPending = false
+    private var recoveryGeneration: UInt64 = 0
+    private var recoveryInProgress = false
+    private var recoveryRestartPending = false
 
     public init(
         recovery: any PendingSpeakerRecovering,
@@ -53,17 +56,43 @@ public final class ApplicationLifecycleCoordinator {
     public func stop() {
         guard !isStopped else { return }
         isStopped = true
+        recoveryGeneration += 1
+        if state == .recovering { recoveryRestartPending = true }
         monitors.stopAll()
     }
 
     public func resume() {
         guard hasStarted else { return }
         isStopped = false
+        guard state == .recovering else { return }
+        recoveryRestartPending = true
+        guard !recoveryInProgress else { return }
+        Task { @MainActor [weak self] in
+            await self?.recoverAndPublish()
+        }
     }
 
     private func recoverAndPublish() async {
-        let outcome = await recovery.recoverPending()
-        guard !isStopped else { return }
+        guard !recoveryInProgress else {
+            recoveryRestartPending = true
+            return
+        }
+        recoveryInProgress = true
+        defer { recoveryInProgress = false }
+
+        repeat {
+            recoveryRestartPending = false
+            let generation = recoveryGeneration
+            let outcome = await recovery.recoverPending()
+            if generation != recoveryGeneration || isStopped {
+                if !isStopped, recoveryRestartPending { continue }
+                return
+            }
+            publishRecovery(outcome)
+        } while recoveryRestartPending && !isStopped
+    }
+
+    private func publishRecovery(_ outcome: SpeakerRecoveryOutcome) {
         switch outcome {
         case .noPendingRecovery, .restored:
             do {
@@ -133,13 +162,15 @@ public final class ApplicationTerminationCoordinator {
         if let terminationTask {
             return await terminationTask.value
         }
+        if timedOutShutdownConvergenceTask != nil {
+            lastOutcome = .timedOut
+            return .cancel
+        }
 
         let shutdown = shutdown
         let timeout = timeout
         let timing = timing
-        let convergenceTask = timedOutShutdownConvergenceTask
         let task = Task<TerminationDecision, Never> { @MainActor [weak self] in
-            await convergenceTask?.value
             let shutdownTask = Task { @MainActor in
                 await shutdown.shutdownAndRestore()
             }

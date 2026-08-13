@@ -300,16 +300,21 @@ final class ControllableRecoveryRuntime: PendingSpeakerRecovering, @unchecked Se
 
 actor BlockingRouteRecoveryRuntime: PendingSpeakerRecovering {
     private var callCount = 0
+    private let blockedCall: Int
     private var blockedContinuation: CheckedContinuation<SpeakerRecoveryOutcome, Never>?
+
+    init(blockedCall: Int = 2) {
+        self.blockedCall = blockedCall
+    }
 
     func recoverPending() async -> SpeakerRecoveryOutcome {
         callCount += 1
-        if callCount == 1 { return .waitingForMatchingDevice }
-        if callCount == 2 {
+        if callCount == blockedCall {
             return await withCheckedContinuation { continuation in
                 blockedContinuation = continuation
             }
         }
+        if callCount == 1 { return .waitingForMatchingDevice }
         return .restored
     }
 
@@ -384,6 +389,16 @@ final class BlockingShutdownSpy: ApplicationShuttingDown {
     }
 }
 
+actor TerminationDecisionProbe {
+    private var decision: TerminationDecision?
+
+    func record(_ decision: TerminationDecision) {
+        self.decision = decision
+    }
+
+    func observedDecision() -> TerminationDecision? { decision }
+}
+
 struct ImmediateTerminationTimeout: TerminationTiming {
     func wait(for duration: Duration) async {}
 }
@@ -392,6 +407,10 @@ struct SystemTerminationTimeout: TerminationTiming {
     func wait(for duration: Duration) async {
         try? await Task.sleep(for: duration)
     }
+}
+
+struct ImmediateTerminationTiming: TerminationTiming {
+    func wait(for duration: Duration) async {}
 }
 
 actor SequencedTerminationTiming: TerminationTiming {

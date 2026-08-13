@@ -80,6 +80,25 @@ final class ApplicationLifecycleCoordinatorTests: XCTestCase {
         XCTAssertEqual(monitors.startAllCount, 1)
     }
 
+    // This fails if stop/resume during startup discards recovery and leaves the lifecycle stuck recovering.
+    func testResumeDuringInFlightStartupRecoveryRestartsRecovery() async {
+        let recovery = BlockingRouteRecoveryRuntime(blockedCall: 1)
+        let monitors = MonitorSpy()
+        let lifecycle = ApplicationLifecycleCoordinator(recovery: recovery, monitors: monitors)
+        let startup = Task { await lifecycle.start() }
+        while await recovery.observedCallCount() < 1 { await Task.yield() }
+
+        lifecycle.stop()
+        lifecycle.resume()
+        await recovery.resumeBlockedRoute(with: .restored)
+        await startup.value
+
+        XCTAssertEqual(lifecycle.state, .ready)
+        let callCount = await recovery.observedCallCount()
+        XCTAssertEqual(callCount, 2)
+        XCTAssertEqual(monitors.startAllCount, 1)
+    }
+
     // This fails if corrupt or safety-unknown recovery starts even route monitoring.
     func testNonRouteRecoveryBlockStartsNoMonitors() async {
         let recovery = ControllableRecoveryRuntime(result: .failedSafetyUnknown)
@@ -183,7 +202,7 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
     }
 
     // This fails if timeout resumes monitoring or starts a second shutdown before the first one converges.
-    func testTimeoutWaitsForShutdownConvergenceBeforeResumeAndRetry() async {
+    func testTimeoutCancelsRetryUntilShutdownConvergesThenAllowsFreshAttempt() async {
         let shutdown = BlockingShutdownSpy()
         let coordinator = ApplicationTerminationCoordinator(
             shutdown: shutdown,
@@ -195,19 +214,20 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
         XCTAssertEqual(firstDecision, .cancel)
         XCTAssertEqual(shutdown.cancelledAttemptCount, 0)
 
-        let retry = Task { await coordinator.requestTermination() }
-        await Task.yield()
+        let retryDecision = await coordinator.requestTermination()
+        XCTAssertEqual(retryDecision, .cancel)
         XCTAssertEqual(shutdown.callCount, 1)
 
         shutdown.finishFirst(with: .restored)
-        let retryDecision = await retry.value
-        XCTAssertEqual(retryDecision, .allow)
+        while shutdown.cancelledAttemptCount == 0 { await Task.yield() }
+        let freshDecision = await coordinator.requestTermination()
+        XCTAssertEqual(freshDecision, .allow)
         XCTAssertEqual(shutdown.callCount, 2)
         XCTAssertEqual(shutdown.cancelledAttemptCount, 1)
     }
 
-    // This fails if concurrent retries after timeout each create their own shutdown attempt.
-    func testConcurrentRetriesDuringTimeoutConvergenceShareOneFreshShutdown() async {
+    // This fails if concurrent retries during convergence create any new shutdown attempt.
+    func testConcurrentRetriesDuringTimeoutConvergenceCancelWithoutNewShutdown() async {
         let shutdown = BlockingShutdownSpy()
         let coordinator = ApplicationTerminationCoordinator(
             shutdown: shutdown,
@@ -224,7 +244,35 @@ final class ApplicationTerminationCoordinatorTests: XCTestCase {
 
         shutdown.finishFirst(with: .restored)
         let retryDecisions = await [firstRetry, secondRetry]
-        XCTAssertEqual(retryDecisions, [.allow, .allow])
-        XCTAssertEqual(shutdown.callCount, 2)
+        XCTAssertEqual(retryDecisions, [.cancel, .cancel])
+        XCTAssertEqual(shutdown.callCount, 1)
+    }
+
+    // This fails if a retry remains pending while a previously timed-out shutdown has not converged.
+    func testRetryWhileTimedOutShutdownIsHungReturnsBoundedCancellation() async {
+        let shutdown = BlockingShutdownSpy()
+        let coordinator = ApplicationTerminationCoordinator(
+            shutdown: shutdown,
+            timeout: .seconds(5),
+            timing: ImmediateTerminationTiming()
+        )
+
+        let first = await coordinator.requestTermination()
+        let probe = TerminationDecisionProbe()
+        let retry = Task {
+            let decision = await coordinator.requestTermination()
+            await probe.record(decision)
+            return decision
+        }
+        for _ in 0..<10 { await Task.yield() }
+        let observedRetry = await probe.observedDecision()
+
+        XCTAssertEqual(first, .cancel)
+        XCTAssertEqual(observedRetry, .cancel)
+        XCTAssertEqual(shutdown.callCount, 1)
+
+        shutdown.finishFirst(with: .restored)
+        _ = await retry.value
+        while shutdown.cancelledAttemptCount == 0 { await Task.yield() }
     }
 }

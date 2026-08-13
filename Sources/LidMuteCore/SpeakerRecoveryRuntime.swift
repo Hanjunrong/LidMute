@@ -127,7 +127,8 @@ public actor SpeakerRecoveryRuntime: SpeakerProtectionApplying, PendingSpeakerRe
                 try recoveryStore.markFinalizingRestore(transactionID: snapshot.transactionID)
             }
 
-            guard audio.supportsWritableMute(on: device) else {
+            guard !snapshot.originalState.usedVolumeFallback,
+                  audio.supportsWritableMute(on: device) else {
                 return keepFallbackDeviceSilent(device)
             }
 
