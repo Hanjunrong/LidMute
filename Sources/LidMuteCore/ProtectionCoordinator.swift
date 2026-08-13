@@ -13,7 +13,8 @@ public final class ProtectionCoordinator {
     private var disableRestoreState: AudioDeviceState?
     private var disableRestoreDevice: AudioDevice?
     private var activeSources: Set<ProtectionSource> = []
-    private var observedLidClosed: Bool?
+    private var observedPhysicalLidClosed: Bool?
+    private var observedSimulation: SimulationLidState?
     private var activeOutputPIDs: Set<Int32> = []
     private var lastSilenceError: String?
     private var sequence: UInt64 = 0
@@ -44,19 +45,53 @@ public final class ProtectionCoordinator {
         }
     }
 
-    public func receiveLidState(closed: Bool, simulated: Bool = false) {
+    public func receivePhysicalLid(closed: Bool) {
         guard isEnabled else { return }
-        guard observedLidClosed != closed else { return }
-        observedLidClosed = closed
+        guard observedPhysicalLidClosed != closed else { return }
+        observedPhysicalLidClosed = closed
         activeOutputPIDs.removeAll()
         lastSilenceError = nil
 
         if closed {
-            record(simulated ? .simulation : .lidClosed, simulated ? "模拟合盖" : "检测到合盖")
-            updateProtectionSource(.lid, active: true)
+            record(.lidClosed, "检测到合盖")
+            updateProtectionSource(.physicalLid, active: true)
         } else {
-            record(simulated ? .simulation : .lidOpened, simulated ? "模拟开盖" : "检测到开盖")
-            updateProtectionSource(.lid, active: false)
+            record(.lidOpened, "检测到开盖")
+            updateProtectionSource(.physicalLid, active: false)
+        }
+    }
+
+    public func receiveSimulation(_ simulation: SimulationLidState) {
+        guard isEnabled else { return }
+        guard simulation == .reset || observedSimulation != simulation else { return }
+
+        switch simulation {
+        case .closed:
+            observedSimulation = .closed
+            activeOutputPIDs.removeAll()
+            lastSilenceError = nil
+            record(.simulation, "模拟合盖")
+            updateProtectionSource(.simulation, active: true)
+        case .opened:
+            observedSimulation = .opened
+            activeOutputPIDs.removeAll()
+            lastSilenceError = nil
+            record(.simulation, "模拟开盖")
+            updateProtectionSource(.simulation, active: false)
+        case .reset:
+            observedSimulation = nil
+            activeOutputPIDs.removeAll()
+            lastSilenceError = nil
+            record(.simulation, "已重置模拟合盖状态")
+            updateProtectionSource(.simulation, active: false)
+        }
+    }
+
+    public func receiveLidState(closed: Bool, simulated: Bool = false) {
+        if simulated {
+            receiveSimulation(closed ? .closed : .opened)
+        } else {
+            receivePhysicalLid(closed: closed)
         }
     }
 
@@ -155,7 +190,7 @@ public final class ProtectionCoordinator {
             return
         }
 
-        if source == .lid {
+        if source == .physicalLid || source == .simulation {
             state = restoreForLidOpen() ? .armed : .unavailable
         } else {
             restoreForNightEnd()
@@ -216,7 +251,8 @@ public final class ProtectionCoordinator {
     }
 
     private func resetObservationState() {
-        observedLidClosed = nil
+        observedPhysicalLidClosed = nil
+        observedSimulation = nil
         activeOutputPIDs.removeAll()
         lastSilenceError = nil
     }

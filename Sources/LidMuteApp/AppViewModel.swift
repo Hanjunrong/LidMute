@@ -121,7 +121,7 @@ final class AppViewModel: ObservableObject {
             isNightProtectionActive = false
         }
         if enabled, let latestSystemLidClosed {
-            coordinator.receiveLidState(closed: latestSystemLidClosed)
+            coordinator.receivePhysicalLid(closed: latestSystemLidClosed)
         }
         refreshNightProtection()
         refresh()
@@ -129,7 +129,7 @@ final class AppViewModel: ObservableObject {
 
     func receiveSystemLidState(_ closed: Bool) {
         latestSystemLidClosed = closed
-        coordinator.receiveLidState(closed: closed)
+        coordinator.receivePhysicalLid(closed: closed)
         refresh()
     }
 
@@ -141,20 +141,20 @@ final class AppViewModel: ObservableObject {
     func simulateLidClosed() {
         guard simulatedLidState != .closed else { return }
         simulatedLidState = .closed
-        coordinator.receiveLidState(closed: true, simulated: true)
+        coordinator.receiveSimulation(.closed)
         refresh()
     }
 
     func simulateLidOpened() {
         guard simulatedLidState != .opened else { return }
         simulatedLidState = .opened
-        coordinator.receiveLidState(closed: false, simulated: true)
+        coordinator.receiveSimulation(.opened)
         refresh()
     }
 
     func resetSimulationState() {
         simulatedLidState = .opened
-        if isEnabled { coordinator.receiveLidState(closed: false, simulated: true) }
+        if isEnabled { coordinator.receiveSimulation(.reset) }
         refresh()
     }
 

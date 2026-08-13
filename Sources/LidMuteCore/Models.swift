@@ -8,8 +8,15 @@ public enum ProtectionState: String, Codable, Sendable {
 }
 
 public enum ProtectionSource: String, Codable, Hashable, Sendable {
-    case lid
+    case physicalLid
+    case simulation
     case night
+}
+
+public enum SimulationLidState: Sendable {
+    case closed
+    case opened
+    case reset
 }
 
 public enum MediaCommand: Int, Codable, CaseIterable, Sendable {
