@@ -369,12 +369,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         guard !isClearingObservationData else { return }
         isClearingObservationData = true
         observationEpoch &+= 1
-        let shouldResumePolling = inboxTimer != nil
         inboxTimer?.invalidate()
         inboxTimer = nil
         defer {
             isClearingObservationData = false
-            if shouldResumePolling { startChromeObservationTimerIfReady() }
+            startChromeObservationTimerIfReady()
         }
 
         let queuedProtectionWork = protectionEventTask

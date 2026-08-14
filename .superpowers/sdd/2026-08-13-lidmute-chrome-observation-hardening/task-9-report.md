@@ -181,3 +181,33 @@ After a successful or partially successful clear, App resets old presentation an
 
 - Slow and failed clear behavior uses a deterministic test store rather than a live saturated disk or revoked Application Support permissions.
 - No installed Chrome extension, real Application Support data, or live speaker state was modified. No UI layout changes were made.
+
+## Review fix round 4
+
+### Result
+
+Observation clear finalization now decides whether to resume Chrome polling from the current lifecycle and shutdown state rather than from whether an inbox timer existed when clear began. After lowering `isClearingObservationData`, clear always delegates to `startChromeObservationTimerIfReady()`. A recovery or route retry that reaches `.ready` during slow clear therefore starts one timer and performs an immediate poll after the clear boundary, while the helper continues to reject non-ready, clearing, and shutdown states and preserves its existing single-timer guard.
+
+The observation epoch, persistent clear, presentation reset, and coordinator clear-boundary ordering are unchanged.
+
+### RED / GREEN evidence
+
+- RED: a controllably paused clear began while lifecycle state was `.recovering` and no inbox timer existed. A route callback published `.ready` while clear was paused, but polling stayed suppressed during the boundary. After clear released, the old timer snapshot kept polling permanently stopped: `consumeCount` remained `0` instead of reaching `1`.
+- GREEN: clear no longer captures the old timer's existence. Its defer first sets `isClearingObservationData = false`, then calls `startChromeObservationTimerIfReady()`, which observes the now-ready lifecycle, installs the timer, and performs the immediate poll. The same controlled test reaches `consumeCount == 1` after release.
+- Guard coverage: clear completion while lifecycle remains `.recovering` and clear after shutdown both perform zero consumes. Repeated ready route callbacks leave the immediate consume count at one, demonstrating that the existing `inboxTimer == nil` guard retains a single polling timer.
+
+### Review-round verification
+
+- Focused Swift regression filter (`AppViewModelObservationTests|ObservationClearTests|ProtectionCoordinatorJournalIntegrationTests|ProtectionRouteRetryTests|ApplicationLifecycleCoordinatorTests`): 20 XCTest tests and 20 Swift Testing tests passed.
+- Full Swift verification: 118 XCTest tests and 28 Swift Testing tests passed.
+- `node --test ChromeExtension/service-worker.test.mjs`: 7 passed, 0 failed.
+- `bash Scripts/check-visual-principles.sh`: `PASS visual principle source checks`.
+- `Scripts/make-app-bundle.sh`: fresh Swift build, resource assembly, stale-binary check, icon generation, and ad-hoc signing passed.
+- `Scripts/run-smoke-check.sh` with an existing explicit `TMPDIR`: full Swift and Node suites, visual checks, two bundle builds, signing, and `PASS LidMute smoke check` completed successfully.
+- Required source scan returned zero matches for silent JSON corruption skipping, whole-inbox App reads, per-callback history reloads, or sorted dedup suffixes.
+- `git diff --check`: clean.
+
+### Review-round manual gaps
+
+- The recovering-to-ready clear race uses deterministic lifecycle and slow-clear test doubles rather than a live route recovery with stalled storage.
+- No installed Chrome extension, real Application Support data, or live speaker state was modified. No UI layout changes were made.

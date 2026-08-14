@@ -412,6 +412,88 @@ func chromeConsumptionWaitsForReadyLifecycle() async throws {
 
 @MainActor
 @Test
+func clearStartsChromePollingWhenLifecycleBecomesReadyDuringClear() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-clear-recovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+
+    let store = AppPipelineEventStore()
+    let consumer = CountingInboxConsumer()
+    let lifecycle = MutableLifecycleState(.recovering)
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: store,
+        inboxConsumer: consumer,
+        observationStore: store,
+        lifecycle: lifecycle,
+        chromeManifestURL: manifestURL
+    )
+
+    store.pauseNextClear()
+    let clear = Task { @MainActor in await model.clearObservationData() }
+    for _ in 0..<100 where !store.isClearPaused { await Task.yield() }
+    #expect(store.isClearPaused)
+    #expect(consumer.consumeCount == 0)
+
+    lifecycle.state = .ready
+    model.receiveAudioRouteChanged()
+    for _ in 0..<100 where model.lifecycleState != .ready { await Task.yield() }
+    #expect(model.lifecycleState == .ready)
+    #expect(consumer.consumeCount == 0)
+
+    store.resumePausedClear()
+    await clear.value
+    for _ in 0..<100 where consumer.consumeCount == 0 { await Task.yield() }
+
+    #expect(consumer.consumeCount == 1)
+    model.stopAll()
+}
+
+@MainActor
+@Test
+func clearDoesNotStartChromePollingWhileLifecycleRemainsRecovering() async throws {
+    let harness = try AppViewModelHarness(lifecycle: .recovering)
+
+    await harness.model.clearObservationData()
+    for _ in 0..<100 { await Task.yield() }
+
+    #expect(harness.consumer.consumeCount == 0)
+}
+
+@MainActor
+@Test
+func clearDoesNotStartChromePollingAfterShutdown() async throws {
+    let harness = try AppViewModelHarness(lifecycle: .ready)
+
+    _ = await harness.model.shutdownAndRestore()
+    await harness.model.clearObservationData()
+    for _ in 0..<100 { await Task.yield() }
+
+    #expect(harness.consumer.consumeCount == 0)
+}
+
+@MainActor
+@Test
+func repeatedReadyRouteChangesKeepOneChromePollingTimer() async throws {
+    let harness = try AppViewModelHarness(lifecycle: .ready)
+
+    harness.model.receiveAudioRouteChanged()
+    for _ in 0..<100 where harness.consumer.consumeCount == 0 { await Task.yield() }
+    #expect(harness.consumer.consumeCount == 1)
+
+    harness.model.receiveAudioRouteChanged()
+    harness.model.receiveAudioRouteChanged()
+    for _ in 0..<100 { await Task.yield() }
+
+    #expect(harness.consumer.consumeCount == 1)
+    harness.model.stopAll()
+}
+
+@MainActor
+@Test
 func chromeConsumptionRunsOffMainActorAndPublishesOnlyAfterCompletion() async throws {
     let record = appRecord()
     let consumer = PausingInboxConsumer(record: record)
