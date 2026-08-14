@@ -52,6 +52,14 @@ invalid_root_mkdir_log="$fixture/invalid-root-mkdir.log"
 [[ ! -e "$invalid_root_mkdir_log" ]]
 print "PASS invalid repository root has no filesystem side effects"
 
+mkdir -p "$fixture/no-dist-repo"
+if validate_output_path "$fixture/no-dist-repo" "$fixture/no-dist-repo/dist/NoDist.app" >/dev/null 2>&1; then
+  print -u2 "unexpected safe path without an existing dist directory"
+  exit 1
+fi
+[[ ! -e "$fixture/no-dist-repo/dist" ]]
+print "PASS path validation never creates an unbound dist directory"
+
 [[ "$(read_version_value "$root/Config/Version.plist" CFBundleShortVersionString)" == "0.1.0" ]]
 [[ "$(read_version_value "$root/Config/Version.plist" CFBundleVersion)" == "1" ]]
 ! /usr/libexec/PlistBuddy -c 'Print :com.apple.security.get-task-allow' "$root/Config/LidMuteRelease.entitlements" >/dev/null 2>&1
@@ -67,7 +75,7 @@ if validate_developer_id_inputs "Developer ID Application: Example (TEAMID)" "" 
 print "PASS deterministic signing mode and credential gates"
 
 grep -Fq -- '--configuration release' "$root/Scripts/make-app-bundle.sh"
-grep -Fq 'mktemp -d "$dist/.lidmute-stage.XXXXXX"' "$root/Scripts/make-app-bundle.sh"
+grep -Fq '_release_filesystem "$root" create-stage "$app_name"' "$root/Scripts/make-app-bundle.sh"
 grep -Fq 'sign_adhoc_bundle "$root" "$staged_app"' "$root/Scripts/make-app-bundle.sh"
 grep -Fq 'sign_developer_id_bundle "$root" "$staged_app" "$LIDMUTE_DEVELOPER_IDENTITY"' "$root/Scripts/make-app-bundle.sh"
 grep -Fq 'notarize_and_staple "$staged_app" "$LIDMUTE_NOTARY_PROFILE" "$staging"' "$root/Scripts/make-app-bundle.sh"
@@ -107,3 +115,18 @@ stages_after="$(find "$root/dist" -maxdepth 1 -name '.lidmute-stage.*' -print | 
 [[ "$stages_after" == "$stages_before" ]]
 cleanup_output_bundle "$root" "$cleanup_probe_app"
 print "PASS failed Developer ID signing cleans staging without fallback"
+
+[[ -f "$root/Scripts/release-filesystem.swift" ]]
+grep -Fq 'with-dist' "$root/Scripts/make-app-bundle.sh"
+grep -Fq 'LIDMUTE_DIST_HANDLE_ACTIVE' "$root/Scripts/make-app-bundle.sh"
+grep -Fq 'create-stage' "$root/Scripts/make-app-bundle.sh"
+grep -Fq 'install_staged_bundle "$root" "$staged_app" "$app"' "$root/Scripts/make-app-bundle.sh"
+grep -Fq 'renameatx_np' "$root/Scripts/release-filesystem.swift"
+grep -Fq 'O_NOFOLLOW' "$root/Scripts/release-filesystem.swift"
+grep -Fq 'unlinkat' "$root/Scripts/release-filesystem.swift"
+grep -Fq 'flock' "$root/Scripts/release-filesystem.swift"
+! grep -Fq '.lidmute-install.lock' "$root/Scripts/release-filesystem.swift"
+! grep -Eq '(^|[[:space:]])(mv|rm)([[:space:]]|$)' "$root/Scripts/lib/release-packaging.zsh"
+print "PASS fixed directory handle release source contract"
+
+zsh "$root/Scripts/test-release-filesystem.sh"

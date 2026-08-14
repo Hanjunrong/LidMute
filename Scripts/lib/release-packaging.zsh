@@ -5,7 +5,7 @@ validate_output_path() {
   local canonical_root dist canonical_dist parent base canonical_parent resolved
   canonical_root="$(cd -P -- "$repo_root" && pwd)" || return 64
   dist="$canonical_root/dist"
-  mkdir -p -- "$dist" || return 64
+  [[ -d "$dist" && ! -L "$dist" ]] || return 64
   canonical_dist="$(cd -P -- "$dist" && pwd)" || return 64
   parent="${candidate:h}"
   base="${candidate:t}"
@@ -62,6 +62,41 @@ validate_developer_id_inputs() {
   fi
 }
 
+_release_filesystem_script() {
+  local repo_root="$1"
+  [[ -f "$repo_root/Scripts/release-filesystem.swift" ]] || return 69
+  print -r -- "$repo_root/Scripts/release-filesystem.swift"
+}
+
+_release_filesystem() {
+  local repo_root="$1" helper cache_root operation
+  shift
+  operation="$1"
+  shift
+  helper="$(_release_filesystem_script "$repo_root")" || return 69
+  cache_root="${TMPDIR:-/tmp}/lidmute-release-filesystem-cache"
+  if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]]; then
+    [[ "${LIDMUTE_DIST_FD:-}" == <-> ]] || return 69
+    CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$cache_root/clang}" \
+      SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$cache_root/swift}" \
+      swift "$helper" "$operation" "$LIDMUTE_DIST_FD" "$@"
+    return $?
+  fi
+
+  # Enter the repository's dist directory once, hold it by descriptor, and
+  # run the requested helper operation through that descriptor.
+  CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$cache_root/clang}" \
+    SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$cache_root/swift}" \
+    swift "$helper" with-dist "$repo_root" /bin/zsh -c '
+      set -euo pipefail
+      helper="$1"
+      shift
+      operation="$1"
+      shift
+      swift "$helper" "$operation" "$LIDMUTE_DIST_FD" "$@"
+    ' zsh "$helper" "$operation" "$@"
+}
+
 _validate_managed_dist_child() {
   local repo_root="$1" candidate="$2" kind="$3"
   local canonical_root dist canonical_dist parent canonical_parent base
@@ -82,35 +117,68 @@ _validate_managed_dist_child() {
   print -r -- "$canonical_parent/$base"
 }
 
+_active_dist_child() {
+  local candidate="$1" kind="$2" dist_root="${LIDMUTE_DIST_ROOT:-.}" base
+  [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]] || return 64
+  base="${candidate:t}"
+  [[ "${candidate:h}" == "$dist_root" ]] || return 64
+  case "$kind" in
+    stage) [[ "$base" == .lidmute-stage.* && "$base" != ".lidmute-stage." ]] || return 64 ;;
+    backup) [[ "$base" == .lidmute-backup.* && "$base" != ".lidmute-backup." ]] || return 64 ;;
+    *) return 64 ;;
+  esac
+  print -r -- "$base"
+}
+
 cleanup_output_bundle() {
-  local repo_root="$1" candidate="$2" safe
+  local repo_root="$1" candidate="$2" safe base
   safe="$(validate_output_path "$repo_root" "$candidate")" || return 64
   [[ ! -L "$safe" ]] || return 64
-  if [[ -e "$safe" ]]; then
-    rm -rf -- "$safe"
-  fi
+  base="${safe:t}"
+  _release_filesystem "$repo_root" remove app "$base"
 }
 
 cleanup_staging() {
-  local repo_root="$1" staging="$2" safe_staging
-  [[ -e "$staging" ]] || return 0
-  safe_staging="$(_validate_managed_dist_child "$repo_root" "$staging" stage)" || return 64
-  rm -rf -- "$safe_staging"
+  local repo_root="$1" staging="$2" base
+  if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]]; then
+    base="$(_active_dist_child "$staging" stage)" || return 64
+  else
+    [[ -e "$staging" ]] || return 0
+    base="$(_validate_managed_dist_child "$repo_root" "$staging" stage)" || return 64
+    base="${base:t}"
+  fi
+  _release_filesystem "$repo_root" remove stage "$base"
 }
 
 _cleanup_backup() {
-  local repo_root="$1" backup="$2" safe_backup
-  safe_backup="$(_validate_managed_dist_child "$repo_root" "$backup" backup)" || return 64
-  [[ -e "$safe_backup" ]] || return 0
-  rm -rf -- "$safe_backup"
+  local repo_root="$1" backup="$2" base
+  if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]]; then
+    base="$(_active_dist_child "$backup" backup)" || return 64
+  else
+    [[ -e "$backup" ]] || return 0
+    base="$(_validate_managed_dist_child "$repo_root" "$backup" backup)" || return 64
+    base="${base:t}"
+  fi
+  _release_filesystem "$repo_root" remove backup "$base"
 }
 
 _validate_staged_app() {
   local repo_root="$1" staged_app="$2" destination="$3"
-  local staging safe_staging destination_safe
+  local staging safe_staging destination_safe dist_root destination_name
   staging="${staged_app:h}"
-  safe_staging="$(_validate_managed_dist_child "$repo_root" "$staging" stage)" || return 64
+  if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]]; then
+    dist_root="${LIDMUTE_DIST_ROOT:-.}"
+    [[ "$staging" == "$dist_root"/.lidmute-stage.* ]] || return 64
+    destination_name="${destination:t}"
+    [[ "${destination:h}" == "$dist_root" ]] || return 64
+    [[ "$destination_name" == *.app && "$destination_name" != ".app" ]] || return 64
+    [[ "${staged_app:t}" == "$destination_name" ]] || return 64
+    [[ -d "$staged_app" && ! -L "$staged_app" ]] || return 64
+    print -r -- "$staged_app"
+    return 0
+  fi
   destination_safe="$(validate_output_path "$repo_root" "$destination")" || return 64
+  safe_staging="$(_validate_managed_dist_child "$repo_root" "$staging" stage)" || return 64
   [[ "$staging" == "$safe_staging" ]] || return 64
   [[ "${staged_app:t}" == "${destination_safe:t}" ]] || return 64
   [[ -d "$staged_app" && ! -L "$staged_app" ]] || return 64
@@ -119,32 +187,22 @@ _validate_staged_app() {
 
 install_staged_bundle() {
   local repo_root="$1" staged_app="$2" destination="$3"
-  local safe_staged safe_destination canonical_root dist backup=""
-  safe_destination="$(validate_output_path "$repo_root" "$destination")" || return 64
+  local safe_staged safe_destination stage_name app_name destination_name dist_root
+  if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]]; then
+    safe_destination="$destination"
+  else
+    safe_destination="$(validate_output_path "$repo_root" "$destination")" || return 64
+  fi
   safe_staged="$(_validate_staged_app "$repo_root" "$staged_app" "$safe_destination")" || return 64
-  canonical_root="$(cd -P -- "$repo_root" && pwd)" || return 64
-  dist="$canonical_root/dist"
-
-  if [[ -e "$safe_destination" ]]; then
-    [[ ! -L "$safe_destination" ]] || return 64
-    backup="$dist/.lidmute-backup.$(uuidgen)"
-    _validate_managed_dist_child "$repo_root" "$backup" backup >/dev/null || return 64
-    mv -- "$safe_destination" "$backup" || return 74
+  stage_name="${safe_staged:h:t}"
+  app_name="${safe_staged:t}"
+  destination_name="${safe_destination:t}"
+  [[ "$app_name" == "$destination_name" ]] || return 64
+  if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]]; then
+    dist_root="${LIDMUTE_DIST_ROOT:-.}"
+    [[ "${safe_staged:h:h}" == "$dist_root" ]] || return 64
   fi
-
-  if ! mv -- "$safe_staged" "$safe_destination"; then
-    if [[ -n "$backup" && -e "$backup" ]]; then
-      mv -- "$backup" "$safe_destination" || {
-        print -u2 "Failed to install staged App and restore the previous App"
-        return 74
-      }
-    fi
-    return 74
-  fi
-
-  if [[ -n "$backup" ]]; then
-    _cleanup_backup "$repo_root" "$backup" || return 74
-  fi
+  _release_filesystem "$repo_root" install "$stage_name" "$app_name" "$destination_name"
 }
 
 sign_adhoc_bundle() {

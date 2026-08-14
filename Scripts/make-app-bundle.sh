@@ -2,24 +2,45 @@
 set -euo pipefail
 
 root="${0:A:h:h}"
+script_path="${0:A}"
 source "$root/Scripts/lib/release-packaging.zsh"
-
-app="$(validate_output_path "$root" "${LIDMUTE_APP_PATH:-$root/dist/LidMute.app}")"
-mode="$(resolve_signing_mode "${LIDMUTE_SIGNING_MODE:-}")"
-if [[ "$mode" == "developer-id" ]]; then
-  validate_developer_id_inputs "${LIDMUTE_DEVELOPER_IDENTITY:-}" "${LIDMUTE_NOTARY_PROFILE:-}"
-fi
 
 temp_root="${TMPDIR:-/tmp}"
 temp_root="${temp_root%/}"
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$temp_root/lidmute-clang-cache}"
 export SWIFTPM_CACHE_PATH="${SWIFTPM_CACHE_PATH:-$temp_root/lidmute-swiftpm-cache}"
 scratch="${LIDMUTE_SCRATCH_PATH:-$temp_root/lidmute-build}"
-dist="$root/dist"
-mkdir -p -- "$dist"
-staging="$(mktemp -d "$dist/.lidmute-stage.XXXXXX")"
+
+requested_app="${LIDMUTE_APP_PATH:-$root/dist/LidMute.app}"
+requested_app_abs="${requested_app:A}"
+if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" != "1" ]]; then
+  export LIDMUTE_REQUESTED_APP_ABS="$requested_app_abs"
+  exec swift "$root/Scripts/release-filesystem.swift" with-dist "$root" "$script_path" "$@"
+fi
+
+requested_app="${LIDMUTE_REQUESTED_APP_ABS:-$requested_app_abs}"
+app="$(validate_output_path "$root" "$requested_app")"
+app_name="${app:t}"
+[[ "$app_name" == *.app && "$app_name" != ".app" && "$app_name" != */* ]] || {
+  print -u2 "Invalid release App destination"
+  exit 64
+}
+dist_root="${LIDMUTE_DIST_ROOT:-.}"
+dist_fd="${LIDMUTE_DIST_FD:-}"
+[[ "$dist_fd" == <-> ]] || {
+  print -u2 "Missing fixed dist directory handle"
+  exit 69
+}
+app="$dist_root/$app_name"
+mode="$(resolve_signing_mode "${LIDMUTE_SIGNING_MODE:-}")"
+if [[ "$mode" == "developer-id" ]]; then
+  validate_developer_id_inputs "${LIDMUTE_DEVELOPER_IDENTITY:-}" "${LIDMUTE_NOTARY_PROFILE:-}"
+fi
+
+staging_name="$(_release_filesystem "$root" create-stage "$app_name")"
+staging="$dist_root/$staging_name"
 trap 'cleanup_staging "$root" "$staging"' EXIT ZERR INT TERM
-staged_app="$staging/${app:t}"
+staged_app="$staging/$app_name"
 mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 
 build_args=(
