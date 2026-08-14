@@ -27,6 +27,13 @@ private enum OperationalStorageHealth: Equatable {
     case failure(String)
 }
 
+private enum OperationalStorageSource {
+    case startup
+    case consume
+    case acknowledgement
+    case clear
+}
+
 @MainActor
 protocol LifecycleStateProviding: AnyObject {
     var state: AppLifecycleState { get }
@@ -109,7 +116,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var isChromeInboxPollInFlight = false
     private var observationEpoch: UInt64 = 0
     private var coordinatorStorageHealth: ObservationStorageHealth = .healthy
-    private var operationalStorageHealth: OperationalStorageHealth = .healthy
+    private var startupHealth: OperationalStorageHealth = .healthy
+    private var consumeHealth: OperationalStorageHealth = .healthy
+    private var ackHealth: OperationalStorageHealth = .healthy
+    private var clearHealth: OperationalStorageHealth = .healthy
 
     init(
         applicationSupport: URL? = nil,
@@ -189,7 +199,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             events = Array(try store.recent(limit: 5_000).reversed())
         } catch {
             events = []
-            setOperationalStorageStatus(Self.storageFailureText(error))
+            setOperationalStorageStatus(Self.storageFailureText(error), source: .startup)
         }
         resolveChromeExtensionPath()
         refresh()
@@ -412,10 +422,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 report.isComplete
                     ? ""
                     : "部分数据未清空：\(report.failures.map(\.rawValue).joined(separator: "、"))",
-                severity: .warning
+                severity: .warning,
+                source: .clear
             )
         } catch {
-            setOperationalStorageStatus(Self.storageFailureText(error))
+            setOperationalStorageStatus(Self.storageFailureText(error), source: .clear)
         }
         observationPipelineCoordinator.endObservationClear(clearBoundary, report: clearReport)
     }
@@ -434,6 +445,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             let batch = try await Task.detached(priority: .utility) {
                 try consumer.consumeAvailable()
             }.value
+            setOperationalStorageHealth(batch.health, source: .consume)
             guard lifecycleStateProvider.state == .ready,
                   !isShuttingDown,
                   !isClearingObservationData,
@@ -470,19 +482,27 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                         try await Task.detached(priority: .utility) {
                             try consumer.acknowledgeDelivery(deliveryID)
                         }.value
+                        model.setOperationalStorageStatus("", source: .acknowledgement)
                     } catch {
-                        model.setOperationalStorageStatus(Self.storageFailureText(error))
+                        model.setOperationalStorageStatus(
+                            Self.storageFailureText(error),
+                            source: .acknowledgement
+                        )
                     }
                 }
                 model.refresh()
             }
             await deliveryTask.value
+            guard lifecycleStateProvider.state == .ready,
+                  !isShuttingDown,
+                  !isClearingObservationData,
+                  observationEpoch == pollEpoch else { return }
             lastChromeEventAt = Date()
             chromeConnectionState = .receivedEvent
             chromeBridgeStatus = "已接收 Chrome 标签页事件"
             rebuildCurrentAudioSources()
         } catch {
-            setOperationalStorageStatus(Self.storageFailureText(error))
+            setOperationalStorageStatus(Self.storageFailureText(error), source: .consume)
         }
     }
 
@@ -832,34 +852,58 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     private func setOperationalStorageStatus(
         _ text: String,
-        severity: StorageStatusSeverity = .error
+        severity: StorageStatusSeverity = .error,
+        source: OperationalStorageSource
     ) {
+        let health: OperationalStorageHealth
         if text.isEmpty {
-            operationalStorageHealth = .healthy
+            health = .healthy
         } else if severity == .warning {
-            operationalStorageHealth = .warning(text)
+            health = .warning(text)
         } else {
-            operationalStorageHealth = .failure(text)
+            health = .failure(text)
+        }
+        switch source {
+        case .startup:
+            startupHealth = health
+        case .consume:
+            consumeHealth = health
+        case .acknowledgement:
+            ackHealth = health
+        case .clear:
+            clearHealth = health
         }
         publishStorageStatusPresentation()
     }
 
+    private func setOperationalStorageHealth(
+        _ health: ObservationStorageHealth,
+        source: OperationalStorageSource
+    ) {
+        setOperationalStorageStatus(Self.storageHealthText(health), source: source)
+    }
+
     private func publishStorageStatusPresentation() {
         var messages: [String] = []
+        var severity: StorageStatusSeverity = .none
         if coordinatorStorageHealth != .healthy {
             messages.append(Self.storageHealthText(coordinatorStorageHealth))
+            severity = .error
         }
 
-        let operationalSeverity: StorageStatusSeverity
-        switch operationalStorageHealth {
-        case .healthy:
-            operationalSeverity = .none
-        case let .warning(text):
-            messages.append(text)
-            operationalSeverity = .warning
-        case let .failure(text):
-            messages.append(text)
-            operationalSeverity = .error
+        for health in [startupHealth, consumeHealth, ackHealth, clearHealth] {
+            switch health {
+            case .healthy:
+                break
+            case let .warning(text):
+                messages.append(text)
+                if severity == .none {
+                    severity = .warning
+                }
+            case let .failure(text):
+                messages.append(text)
+                severity = .error
+            }
         }
 
         storageStatusText = messages.reduce(into: [String]()) { uniqueMessages, message in
@@ -867,11 +911,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 uniqueMessages.append(message)
             }
         }.joined(separator: "\n")
-        if coordinatorStorageHealth != .healthy || operationalSeverity == .error {
-            storageStatusSeverity = .error
-        } else {
-            storageStatusSeverity = operationalSeverity
-        }
+        storageStatusSeverity = severity
     }
 
     private static func storageHealthText(_ health: ObservationStorageHealth) -> String {

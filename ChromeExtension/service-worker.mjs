@@ -119,10 +119,14 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
     if (!existing) await createAlarm(deadlineMilliseconds);
   }
 
-  async function clearDeadline(stateBeforeWake) {
+  async function prepareRetryAfterWake(stateBeforeWake) {
     const nextDelayMilliseconds = normalizedDelay(stateBeforeWake.nextDelayMilliseconds);
     await storage.set({ [RETRY_STATE_KEY]: { nextDelayMilliseconds } });
-    await clearAlarm(alarms, RETRY_ALARM_NAME);
+    try {
+      await clearAlarm(alarms, RETRY_ALARM_NAME);
+    } catch {
+      // Reconnecting must not depend on removing an already-fired or stale alarm.
+    }
   }
 
   return {
@@ -154,7 +158,7 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
           return false;
         }
         if (current.deadlineMilliseconds <= now()) {
-          await clearDeadline(current);
+          await prepareRetryAfterWake(current);
           return true;
         }
         await ensureAlarm(current.deadlineMilliseconds);
@@ -170,7 +174,7 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
           await clearAlarm(alarms, RETRY_ALARM_NAME);
           return false;
         }
-        await clearDeadline(current);
+        await prepareRetryAfterWake(current);
         return true;
       });
       return prepared.then((shouldRetry) => shouldRetry ? retry() : undefined);
@@ -178,7 +182,11 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
     succeed() {
       return serial(async () => {
         await storage.remove(RETRY_STATE_KEY);
-        await clearAlarm(alarms, RETRY_ALARM_NAME);
+        try {
+          await clearAlarm(alarms, RETRY_ALARM_NAME);
+        } catch {
+          // With no retained work, a later restore may remove a stale alarm without retrying.
+        }
       });
     }
   };

@@ -60,6 +60,15 @@ private final class RecoveringAppEventStore: EventStoring, @unchecked Sendable {
     func clear() throws { lock.withLock { events.removeAll() } }
 }
 
+private final class StartupFailingEventStore: EventStoring, @unchecked Sendable {
+    func append(_: LidMuteEvent) throws {}
+    func load() throws -> [LidMuteEvent] { [] }
+    func recent(limit _: Int) throws -> [LidMuteEvent] {
+        throw EventStoreError.permissionFailure
+    }
+    func clear() throws {}
+}
+
 private final class CountingInboxConsumer: ChromeInboxConsuming, @unchecked Sendable {
     private let lock = NSLock()
     private var nextRecords: [ChromeInboxRecord]
@@ -132,6 +141,49 @@ private final class ReplayUntilAcknowledgedInboxConsumer: ChromeInboxConsuming, 
         lock.withLock {
             isAcknowledged = true
             _acknowledgedDeliveryIDs.append(deliveryID)
+        }
+    }
+
+    func resetInMemoryState() {}
+}
+
+private enum ScriptedConsumeOutcome {
+    case batch(ChromeConsumeBatch)
+    case failure(ChromeConsumeError)
+}
+
+private enum ScriptedAcknowledgeOutcome {
+    case success
+    case failure(ChromeConsumeError)
+}
+
+private final class ScriptedHealthInboxConsumer: ChromeInboxConsuming, @unchecked Sendable {
+    private let lock = NSLock()
+    private var consumeOutcomes: [ScriptedConsumeOutcome]
+    private var acknowledgeOutcomes: [ScriptedAcknowledgeOutcome]
+
+    init(
+        consumeOutcomes: [ScriptedConsumeOutcome],
+        acknowledgeOutcomes: [ScriptedAcknowledgeOutcome]
+    ) {
+        self.consumeOutcomes = consumeOutcomes
+        self.acknowledgeOutcomes = acknowledgeOutcomes
+    }
+
+    func consumeAvailable() throws -> ChromeConsumeBatch {
+        let outcome = lock.withLock { consumeOutcomes.removeFirst() }
+        switch outcome {
+        case let .batch(batch):
+            return batch
+        case let .failure(error):
+            throw error
+        }
+    }
+
+    func acknowledgeDelivery(_: UUID) throws {
+        let outcome = lock.withLock { acknowledgeOutcomes.removeFirst() }
+        if case let .failure(error) = outcome {
+            throw error
         }
     }
 
@@ -864,6 +916,45 @@ func clearInvalidatesQueuedChromeDeliveryAndWaitsForInFlightDelivery() async thr
 
 @MainActor
 @Test
+func staleChromePollCannotRepublishPresentationWhileClearOwnsTheEpoch() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-poll-clear-presentation-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+    let store = AppPipelineEventStore()
+    let coordinator = PausingChromeEvidenceCoordinator()
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: store,
+        inboxConsumer: CountingInboxConsumer(records: [appRecord()]),
+        observationStore: store,
+        lifecycle: MutableLifecycleState(.ready),
+        chromeManifestURL: manifestURL,
+        observationPipelineCoordinator: coordinator
+    )
+
+    let poll = Task { @MainActor in await model.pollChromeInbox() }
+    for _ in 0..<100 where !coordinator.firstDeliveryStarted { await Task.yield() }
+    #expect(coordinator.firstDeliveryStarted)
+
+    store.pauseNextClear()
+    let clear = Task { @MainActor in await model.clearObservationData() }
+    for _ in 0..<100 where !model.isClearingObservationData { await Task.yield() }
+    coordinator.resumeFirstDelivery()
+    for _ in 0..<200 where !store.isClearPaused { await Task.yield() }
+
+    #expect(store.isClearPaused)
+    #expect(model.chromeBridgeStatus == "等待 Chrome 扩展连接")
+
+    store.resumePausedClear()
+    await poll.value
+    await clear.value
+}
+
+@MainActor
+@Test
 func routeProtectionContinuesDuringSlowObservationClearWithoutDuplicateAction() async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: "lidmute-app-route-clear-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -1064,6 +1155,25 @@ func partialClearReportIsPassedToCoordinatorClearBoundary() async throws {
 
 @MainActor
 @Test
+func partialInboxClearKeepsExistingChromePresentation() async throws {
+    let record = appRecord()
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        records: [record],
+        clearFailures: [.inbox],
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
+    )
+    await harness.model.pollChromeInbox()
+    #expect(harness.model.chromeBridgeStatus == "已接收 Chrome 标签页事件")
+
+    harness.lifecycle.state = .recovering
+    await harness.model.clearObservationData()
+
+    #expect(harness.model.chromeBridgeStatus == "已接收 Chrome 标签页事件")
+}
+
+@MainActor
+@Test
 func eventsClearFailureKeepsTimelineVisibleAndConsistentAfterRestart() async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: "lidmute-app-events-clear-failure-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -1105,6 +1215,107 @@ func eventsClearFailureKeepsTimelineVisibleAndConsistentAfterRestart() async thr
         chromeManifestURL: manifestURL
     )
     #expect(restarted.events == Array(persisted.reversed()))
+}
+
+@MainActor
+@Test
+func consumeAcknowledgementAndClearHealthRecoverWithoutMaskingEachOther() async throws {
+    let firstRecord = appRecord()
+    let secondRecord = appRecord()
+    let firstDeliveryID = UUID()
+    let secondDeliveryID = UUID()
+    let emptyBatch = ChromeConsumeBatch(
+        records: [],
+        deliveryID: nil,
+        committedOffset: 0,
+        health: .healthy
+    )
+    let consumer = ScriptedHealthInboxConsumer(
+        consumeOutcomes: [
+            .batch(ChromeConsumeBatch(
+                records: [firstRecord],
+                deliveryID: firstDeliveryID,
+                committedOffset: 0,
+                health: .healthy
+            )),
+            .failure(.permissionFailure),
+            .batch(emptyBatch),
+            .batch(ChromeConsumeBatch(
+                records: [secondRecord],
+                deliveryID: secondDeliveryID,
+                committedOffset: 0,
+                health: .healthy
+            )),
+        ],
+        acknowledgeOutcomes: [.failure(.capacityFailure), .success]
+    )
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        clearFailures: [.events],
+        inboxConsumer: consumer,
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
+    )
+
+    await harness.model.pollChromeInbox()
+    #expect(harness.model.storageStatusText == "观察存储空间不足")
+
+    await harness.model.pollChromeInbox()
+    #expect(
+        harness.model.storageStatusText ==
+            "观察存储权限不足\n观察存储空间不足"
+    )
+
+    harness.lifecycle.state = .recovering
+    await harness.model.clearObservationData()
+    #expect(
+        harness.model.storageStatusText ==
+            "观察存储权限不足\n观察存储空间不足\n部分数据未清空：events"
+    )
+    #expect(harness.model.storageStatusSeverity == .error)
+
+    harness.lifecycle.state = .ready
+    await harness.model.pollChromeInbox()
+    #expect(
+        harness.model.storageStatusText ==
+            "观察存储空间不足\n部分数据未清空：events"
+    )
+    #expect(harness.model.storageStatusSeverity == .error)
+
+    await harness.model.pollChromeInbox()
+    #expect(harness.model.storageStatusText == "部分数据未清空：events")
+    #expect(harness.model.storageStatusSeverity == .warning)
+
+    harness.lifecycle.state = .recovering
+    harness.clearer.setFailures([])
+    await harness.model.clearObservationData()
+    #expect(harness.model.storageStatusText.isEmpty)
+    #expect(harness.model.storageStatusSeverity == .none)
+}
+
+@MainActor
+@Test
+func successfulClearDoesNotHideStartupHistoryFailure() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-startup-health-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: StartupFailingEventStore(),
+        inboxConsumer: CountingInboxConsumer(),
+        observationStore: RecordingObservationClearer(),
+        lifecycle: MutableLifecycleState(.recovering),
+        chromeManifestURL: manifestURL,
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .notRequired)
+    )
+    #expect(model.storageStatusText == "观察存储权限不足")
+
+    await model.clearObservationData()
+
+    #expect(model.storageStatusText == "观察存储权限不足")
+    #expect(model.storageStatusSeverity == .error)
 }
 
 @MainActor

@@ -58,13 +58,20 @@ function keyValueStorage(initial = {}) {
   };
 }
 
-function alarmHarness() {
+function alarmHarness({ clearFailures = 0 } = {}) {
   const alarms = new Map();
+  let remainingClearFailures = clearFailures;
   return {
     api: {
       async get(name) { return alarms.get(name); },
       create(name, info) { alarms.set(name, { name, ...structuredClone(info) }); },
-      async clear(name) { return alarms.delete(name); }
+      async clear(name) {
+        if (remainingClearFailures > 0) {
+          remainingClearFailures -= 1;
+          throw new Error('injected alarm clear failure');
+        }
+        return alarms.delete(name);
+      }
     },
     get: (name) => structuredClone(alarms.get(name)),
     dropAll: () => alarms.clear()
@@ -353,6 +360,64 @@ test('alarm wake clears the old deadline before reconnecting and keeps backoff a
   assert.equal(alarms.get(RETRY_ALARM_NAME).when, 23_000);
 });
 
+test('alarm wake reconnects and re-arms retry when clearing the fired alarm is rejected', async () => {
+  const storage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: 21_000,
+      nextDelayMilliseconds: 2_000
+    }
+  });
+  const alarms = alarmHarness({ clearFailures: 1 });
+  alarms.api.create(RETRY_ALARM_NAME, { when: 21_000 });
+  let retryCount = 0;
+  let scheduler;
+  scheduler = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {
+      retryCount += 1;
+      await scheduler.schedule();
+    },
+    () => 21_000
+  );
+
+  await scheduler.fire({ name: RETRY_ALARM_NAME });
+
+  assert.equal(retryCount, 1);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 23_000);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 4_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 23_000);
+});
+
+test('overdue restore reconnects and re-arms retry when clearing the old alarm is rejected', async () => {
+  const storage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: 21_000,
+      nextDelayMilliseconds: 2_000
+    }
+  });
+  const alarms = alarmHarness({ clearFailures: 1 });
+  alarms.api.create(RETRY_ALARM_NAME, { when: 21_000 });
+  let retryCount = 0;
+  let scheduler;
+  scheduler = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {
+      retryCount += 1;
+      await scheduler.schedule();
+    },
+    () => 22_000
+  );
+
+  await scheduler.restore();
+
+  assert.equal(retryCount, 1);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 24_000);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 4_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 24_000);
+});
+
 test('terminal acknowledgement clears retry state and alarm and resets capped backoff', async () => {
   const storage = keyValueStorage({
     [RETRY_STATE_KEY]: {
@@ -371,6 +436,50 @@ test('terminal acknowledgement clears retry state and alarm and resets capped ba
   await scheduler.schedule();
   assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 6_000);
   assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 2_000);
+});
+
+test('terminal empty outbox converges after alarm clear rejection without reconnecting', async () => {
+  const outboxStorage = storageWith([{ eventId: 'terminal' }]);
+  const retryStorage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: 65_000,
+      nextDelayMilliseconds: 60_000
+    }
+  });
+  const alarms = alarmHarness({ clearFailures: 1 });
+  alarms.api.create(RETRY_ALARM_NAME, { when: 65_000 });
+  let retryCount = 0;
+  const scheduler = createRetryScheduler(
+    retryStorage.area,
+    alarms.api,
+    async () => { retryCount += 1; },
+    () => 5_000
+  );
+  const controller = createOutboxController(
+    outboxStorage.session,
+    () => {},
+    () => scheduler.schedule(),
+    () => scheduler.succeed()
+  );
+
+  await controller.acknowledge({
+    type: 'ack', eventId: 'terminal', disposition: 'accepted'
+  });
+
+  assert.deepEqual(outboxStorage.snapshot().outbox, []);
+  assert.equal(retryStorage.snapshot()[RETRY_STATE_KEY], undefined);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 65_000);
+
+  const restartedWorker = createRetryScheduler(
+    retryStorage.area,
+    alarms.api,
+    async () => { retryCount += 1; },
+    () => 6_000
+  );
+  await restartedWorker.restore();
+
+  assert.equal(alarms.get(RETRY_ALARM_NAME), undefined);
+  assert.equal(retryCount, 0);
 });
 
 test('retry backoff never grows beyond sixty seconds', async () => {
