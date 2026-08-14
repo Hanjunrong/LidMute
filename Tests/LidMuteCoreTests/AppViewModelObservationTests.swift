@@ -3,6 +3,10 @@ import Testing
 @testable import LidMuteApp
 @testable import LidMuteCore
 
+private enum AppObservationClearTestError: Error {
+    case injectedFailure
+}
+
 private final class CountingEventStore: EventStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var storedEvents: [LidMuteEvent]
@@ -113,10 +117,16 @@ private final class RecordingObservationClearer: ObservationClearing, @unchecked
 }
 
 private actor AppPausingRouteProtectionApplying: SpeakerProtectionApplying {
+    private let timeline: SharedOperationTimeline
     private var shouldPauseRoute = false
     private var routeStarted = false
     private var routeContinuation: CheckedContinuation<Void, Never>?
     private var routeCount = 0
+    private var beginCount = 0
+
+    init(timeline: SharedOperationTimeline = SharedOperationTimeline()) {
+        self.timeline = timeline
+    }
 
     func pauseNextRouteChange() {
         shouldPauseRoute = true
@@ -124,8 +134,13 @@ private actor AppPausingRouteProtectionApplying: SpeakerProtectionApplying {
     }
 
     func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
+        if case .begin = action {
+            beginCount += 1
+            timeline.append("protection.begin")
+        }
         if case .routeChangedWhileProtectionRequired = action {
             routeCount += 1
+            timeline.append("protection.route")
             if shouldPauseRoute {
                 shouldPauseRoute = false
                 routeStarted = true
@@ -146,18 +161,30 @@ private actor AppPausingRouteProtectionApplying: SpeakerProtectionApplying {
     }
 
     func routeChangeCount() -> Int { routeCount }
+    func beginActionCount() -> Int { beginCount }
 }
 
 private final class AppPipelineEventStore: EventStoring, ObservationClearing, @unchecked Sendable {
     private let condition = NSCondition()
+    private let timeline: SharedOperationTimeline
     private var events: [LidMuteEvent] = []
     private var pauseKind: LidMuteEventKind?
     private var appendPaused = false
     private var resumeAppend = false
     private var clearCount = 0
+    private var pauseClear = false
+    private var clearPaused = false
+    private var clearReleased = false
+    private var failClear = false
+
+    init(timeline: SharedOperationTimeline = SharedOperationTimeline()) {
+        self.timeline = timeline
+    }
 
     var isAppendPaused: Bool { condition.withLock { appendPaused } }
     var observationClearCount: Int { condition.withLock { clearCount } }
+    var isClearPaused: Bool { condition.withLock { clearPaused } }
+    var hasClearReleased: Bool { condition.withLock { clearReleased } }
 
     func pauseNextAppend(of kind: LidMuteEventKind) {
         condition.withLock {
@@ -190,12 +217,48 @@ private final class AppPipelineEventStore: EventStoring, ObservationClearing, @u
     }
 
     func clearObservationData(inMemoryReset: () throws -> Void) throws -> ObservationClearReport {
-        condition.withLock {
-            clearCount += 1
-            events.removeAll()
+        condition.lock()
+        clearCount += 1
+        timeline.append("clear.started")
+        if pauseClear {
+            pauseClear = false
+            clearPaused = true
+            condition.broadcast()
+            let deadline = Date().addingTimeInterval(0.2)
+            while !clearReleased, condition.wait(until: deadline) {}
+            clearPaused = false
         }
+        clearReleased = true
+        timeline.append("clear.released")
+        let shouldFail = failClear
+        failClear = false
+        if shouldFail {
+            condition.unlock()
+            throw AppObservationClearTestError.injectedFailure
+        }
+        events.removeAll()
+        condition.unlock()
         try inMemoryReset()
         return ObservationClearReport(oldGeneration: 0, newGeneration: 1, failures: [])
+    }
+
+    func pauseNextClear() {
+        condition.withLock {
+            pauseClear = true
+            clearPaused = false
+            clearReleased = false
+        }
+    }
+
+    func resumePausedClear() {
+        condition.withLock {
+            clearReleased = true
+            condition.broadcast()
+        }
+    }
+
+    func failNextClear() {
+        condition.withLock { failClear = true }
     }
 
     func resumePausedAppend() {
@@ -222,9 +285,18 @@ private final class PausingChromeEvidenceCoordinator: ObservationPipelineCoordin
 
     func receiveAudioRouteChanged() async {}
 
+    func receivePhysicalLid(closed _: Bool) async {}
+
     func flushObservationLogging() async {
         flushCount += 1
     }
+
+    func beginObservationClear() async -> ObservationClearBoundary {
+        flushCount += 1
+        return ObservationClearBoundary(generation: 0)
+    }
+
+    func endObservationClear(_: ObservationClearBoundary) {}
 
     func resumeFirstDelivery() {
         let continuation = firstDeliveryContinuation
@@ -458,7 +530,7 @@ func clearInvalidatesQueuedChromeDeliveryAndWaitsForInFlightDelivery() async thr
 
 @MainActor
 @Test
-func clearWaitsForInFlightRouteProducerAndRejectsRouteDuringClear() async throws {
+func routeProtectionContinuesDuringSlowObservationClearWithoutDuplicateAction() async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: "lidmute-app-route-clear-\(UUID().uuidString)", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -466,9 +538,9 @@ func clearWaitsForInFlightRouteProducerAndRejectsRouteDuringClear() async throws
     let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
     try Data("{}".utf8).write(to: manifestURL)
 
-    let record = appRecord()
-    let protection = AppPausingRouteProtectionApplying()
-    let store = AppPipelineEventStore()
+    let timeline = SharedOperationTimeline()
+    let protection = AppPausingRouteProtectionApplying(timeline: timeline)
+    let store = AppPipelineEventStore(timeline: timeline)
     let pipeline = ProtectionCoordinator(
         protection: protection,
         processEvidence: ScriptedAudioController(),
@@ -477,10 +549,9 @@ func clearWaitsForInFlightRouteProducerAndRejectsRouteDuringClear() async throws
     await pipeline.setEnabled(true)
     await pipeline.receivePhysicalLid(closed: true)
     await pipeline.flushObservationLogging()
-    try store.clear()
 
     let lifecycle = MutableLifecycleState(.ready)
-    let consumer = CountingInboxConsumer(records: [record])
+    let consumer = CountingInboxConsumer(records: [])
     let model = AppViewModel(
         applicationSupport: root,
         eventStore: store,
@@ -491,41 +562,141 @@ func clearWaitsForInFlightRouteProducerAndRejectsRouteDuringClear() async throws
         observationPipelineCoordinator: pipeline
     )
     pipeline.onEvent = { event in model.receiveCoordinatorEvent(event) }
-    await model.pollChromeInbox()
-    for _ in 0..<100 {
-        if try store.load().contains(where: { $0.kind == .chromeTabAudible }) { break }
-        await Task.yield()
-    }
-    await pipeline.flushObservationLogging()
-    #expect(model.chromeBridgeStatus == "已接收 Chrome 标签页事件")
 
-    store.pauseNextAppend(of: .muteEnforced)
-    await protection.pauseNextRouteChange()
-    model.receiveAudioRouteChanged()
-    await protection.waitUntilRouteChangeStarts()
-
+    store.pauseNextClear()
     let clear = Task { @MainActor in await model.clearObservationData() }
-    for _ in 0..<100 where !model.isClearingObservationData { await Task.yield() }
-    for _ in 0..<20 { await Task.yield() }
-    #expect(store.observationClearCount == 0)
+    for _ in 0..<100 where !store.isClearPaused { await Task.yield() }
 
     model.receiveAudioRouteChanged()
-    await protection.resumeRouteChange()
-    for _ in 0..<100 where !store.isAppendPaused {
+    for _ in 0..<100 where await protection.routeChangeCount() == 0 {
         try await Task.sleep(for: .milliseconds(1))
     }
-    #expect(store.isAppendPaused)
-    #expect(store.observationClearCount == 0)
+    #expect(await protection.routeChangeCount() == 1)
+    #expect(!store.hasClearReleased)
 
-    store.resumePausedAppend()
+    store.resumePausedClear()
     await clear.value
+    await pipeline.flushObservationLogging()
 
     #expect(await protection.routeChangeCount() == 1)
     #expect(store.observationClearCount == 1)
-    #expect(try store.load().isEmpty)
-    #expect(model.events.isEmpty)
-    #expect(model.currentAudioSources.allSatisfy { $0.chromeTab == nil })
-    #expect(model.chromeBridgeStatus == "等待 Chrome 扩展连接")
+    #expect(pipeline.state == .protecting)
+    let finalTimeline = timeline.snapshot()
+    #expect(finalTimeline.firstIndex(of: "protection.route")! < finalTimeline.firstIndex(of: "clear.released")!)
+}
+
+@MainActor
+@Test
+func physicalLidProtectionContinuesDuringSlowObservationClearAndPublishesAfterBoundary() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-lid-clear-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+
+    let timeline = SharedOperationTimeline()
+    let protection = AppPausingRouteProtectionApplying(timeline: timeline)
+    let store = AppPipelineEventStore(timeline: timeline)
+    let pipeline = ProtectionCoordinator(
+        protection: protection,
+        processEvidence: ScriptedAudioController(),
+        store: store
+    )
+    await pipeline.setEnabled(true)
+    await pipeline.flushObservationLogging()
+
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: store,
+        inboxConsumer: CountingInboxConsumer(records: []),
+        observationStore: store,
+        lifecycle: MutableLifecycleState(.ready),
+        chromeManifestURL: manifestURL,
+        observationPipelineCoordinator: pipeline
+    )
+    pipeline.onEvent = { event in model.receiveCoordinatorEvent(event) }
+    model.receiveAudioRouteChanged()
+    for _ in 0..<100 where model.lifecycleState != .ready { await Task.yield() }
+    #expect(model.lifecycleState == .ready)
+
+    store.pauseNextClear()
+    let clear = Task { @MainActor in await model.clearObservationData() }
+    for _ in 0..<100 where !store.isClearPaused { await Task.yield() }
+
+    model.receiveSystemLidState(true)
+    for _ in 0..<100 where await protection.beginActionCount() == 0 {
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(await protection.beginActionCount() == 1)
+    #expect(!store.hasClearReleased)
+
+    store.resumePausedClear()
+    await clear.value
+    await pipeline.flushObservationLogging()
+
+    #expect(await protection.beginActionCount() == 1)
+    #expect(pipeline.state == .protecting)
+    #expect(try store.load().map(\.kind) == [.lidClosed, .muteEnforced])
+    #expect(model.events.map(\.kind) == [.muteEnforced, .lidClosed])
+    let finalTimeline = timeline.snapshot()
+    let beginIndex = try #require(finalTimeline.firstIndex(of: "protection.begin"))
+    let releaseIndex = try #require(finalTimeline.firstIndex(of: "clear.released"))
+    #expect(beginIndex < releaseIndex)
+}
+
+@MainActor
+@Test
+func failedObservationClearStillReleasesDeferredSafetyLogging() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-failed-clear-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+
+    let protection = AppPausingRouteProtectionApplying()
+    let store = AppPipelineEventStore()
+    let pipeline = ProtectionCoordinator(
+        protection: protection,
+        processEvidence: ScriptedAudioController(),
+        store: store
+    )
+    await pipeline.setEnabled(true)
+    await pipeline.flushObservationLogging()
+
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: store,
+        inboxConsumer: CountingInboxConsumer(records: []),
+        observationStore: store,
+        lifecycle: MutableLifecycleState(.ready),
+        chromeManifestURL: manifestURL,
+        observationPipelineCoordinator: pipeline
+    )
+    pipeline.onEvent = { event in model.receiveCoordinatorEvent(event) }
+    model.receiveAudioRouteChanged()
+    for _ in 0..<100 where model.lifecycleState != .ready { await Task.yield() }
+
+    store.failNextClear()
+    store.pauseNextClear()
+    let clear = Task { @MainActor in await model.clearObservationData() }
+    for _ in 0..<100 where !store.isClearPaused { await Task.yield() }
+    model.receiveSystemLidState(true)
+    for _ in 0..<100 where await protection.beginActionCount() == 0 {
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(await protection.beginActionCount() == 1)
+    #expect(!store.hasClearReleased)
+
+    store.resumePausedClear()
+    await clear.value
+    await pipeline.flushObservationLogging()
+
+    #expect(pipeline.state == .protecting)
+    #expect(try store.load().map(\.kind) == [.protectionEnabled, .lidClosed, .muteEnforced])
+    #expect(model.events.map(\.kind) == [.muteEnforced, .lidClosed, .protectionEnabled])
+    #expect(!model.storageStatusText.isEmpty)
 }
 
 @MainActor

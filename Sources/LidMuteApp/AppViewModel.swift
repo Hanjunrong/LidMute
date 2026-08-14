@@ -26,8 +26,11 @@ extension ApplicationLifecycleCoordinator: LifecycleStateProviding {}
 @MainActor
 protocol ObservationPipelineCoordinating: AnyObject {
     func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async
+    func receivePhysicalLid(closed: Bool) async
     func receiveAudioRouteChanged() async
     func flushObservationLogging() async
+    func beginObservationClear() async -> ObservationClearBoundary
+    func endObservationClear(_ boundary: ObservationClearBoundary)
 }
 
 extension ProtectionCoordinator: ObservationPipelineCoordinating {}
@@ -279,7 +282,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             guard !model.isShuttingDown else { return }
             await model.coordinator.setEnabled(enabled)
             if enabled, let latestSystemLidClosed = model.latestSystemLidClosed {
-                await model.coordinator.receivePhysicalLid(closed: latestSystemLidClosed)
+                await model.observationPipelineCoordinator.receivePhysicalLid(closed: latestSystemLidClosed)
             }
             await model.refreshNightProtection()
             model.refresh()
@@ -291,7 +294,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         latestSystemLidClosed = closed
         enqueueProtectionEvent { model in
             guard !model.isShuttingDown else { return }
-            await model.coordinator.receivePhysicalLid(closed: closed)
+            await model.observationPipelineCoordinator.receivePhysicalLid(closed: closed)
             model.refresh()
         }
     }
@@ -378,27 +381,21 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         let queuedRouteWork = routeChangeTask
         await queuedProtectionWork?.value
         await queuedRouteWork?.value
-        await observationPipelineCoordinator.flushObservationLogging()
+        let clearBoundary = await observationPipelineCoordinator.beginObservationClear()
 
         do {
-            let report = try observationStore.clearObservationData { [self] in
-                events.removeAll()
-                latestChromeEvidence = nil
-                lastChromeEventAt = nil
-                currentAudioSources = AudioSourcePresentation.current(
-                    processes: currentAudioProcesses,
-                    chromeTab: nil
-                )
-                inboxConsumer.resetInMemoryState()
-                chromeConnectionState = .waitingForExtension
-                chromeBridgeStatus = "等待 Chrome 扩展连接"
-            }
+            let observationStore = observationStore
+            let report = try await Task.detached(priority: .utility) {
+                try observationStore.clearObservationData(inMemoryReset: {})
+            }.value
+            resetObservationPresentation()
             storageStatusText = report.isComplete
                 ? ""
                 : "部分数据未清空：\(report.failures.map(\.rawValue).joined(separator: "、"))"
         } catch {
             storageStatusText = Self.storageFailureText(error)
         }
+        observationPipelineCoordinator.endObservationClear(clearBoundary)
     }
 
     func pollChromeInbox() async {
@@ -483,6 +480,19 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         )
     }
 
+    private func resetObservationPresentation() {
+        events.removeAll()
+        latestChromeEvidence = nil
+        lastChromeEventAt = nil
+        currentAudioSources = AudioSourcePresentation.current(
+            processes: currentAudioProcesses,
+            chromeTab: nil
+        )
+        inboxConsumer.resetInMemoryState()
+        chromeConnectionState = .waitingForExtension
+        chromeBridgeStatus = "等待 Chrome 扩展连接"
+    }
+
     private func refreshNightProtection() async {
         guard lifecycleState == .ready, !isShuttingDown else { return }
         let validTime = NightProtectionPreferences.minutes(from: nightStartText) != nil &&
@@ -509,6 +519,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private func startChromeObservationTimerIfReady() {
         guard lifecycleStateProvider.state == .ready,
               !isShuttingDown,
+              !isClearingObservationData,
               inboxTimer == nil else { return }
         inboxTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.pollChromeInbox() }
@@ -675,7 +686,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     func receiveAudioRouteChanged() {
-        guard !isShuttingDown, !isClearingObservationData else { return }
+        guard !isShuttingDown else { return }
         if routeChangeTask != nil {
             routeChangePending = true
             return
@@ -691,9 +702,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 routeChangePending = false
                 await lifecycleStateProvider.receiveAudioRouteChanged()
                 lifecycleState = lifecycleStateProvider.state
-                guard !isClearingObservationData,
-                      observationEpoch == routeEpoch else { return }
-                startChromeObservationTimerIfReady()
+                if !isClearingObservationData, observationEpoch == routeEpoch {
+                    startChromeObservationTimerIfReady()
+                }
                 if lifecycleState == .ready, !isShuttingDown {
                     await observationPipelineCoordinator.receiveAudioRouteChanged()
                 }
@@ -705,7 +716,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private func enqueueProtectionEvent(
         _ operation: @escaping @MainActor (AppViewModel) async -> Void
     ) {
-        guard !isClearingObservationData else { return }
         let predecessor = protectionEventTask
         let task = Task { @MainActor [weak self] in
             await predecessor?.value

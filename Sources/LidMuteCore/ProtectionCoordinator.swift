@@ -1,5 +1,9 @@
 import Foundation
 
+public struct ObservationClearBoundary: Equatable, Sendable {
+    let generation: UInt64
+}
+
 @MainActor
 public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> {
     public private(set) var state: ProtectionState = .inactive
@@ -19,15 +23,21 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     private var transitionSequence: UInt64 = 0
     private var bufferedObservationEvents: [LidMuteEvent]?
     private var observationLoggingTask: Task<Void, Never>?
+    private var observationGeneration: UInt64 = 0
+    private var activeObservationClearBoundary: ObservationClearBoundary?
+    private var deferredObservationEvents: [LidMuteEvent] = []
+    private let maximumDeferredObservationEvents: Int
 
     public init(
         protection: Protection,
         processEvidence: any AudioProcessEvidenceProviding,
-        store: EventStoring
+        store: EventStoring,
+        maximumDeferredObservationEvents: Int = 5_000
     ) {
         self.protection = protection
         self.processEvidence = processEvidence
         self.store = store
+        self.maximumDeferredObservationEvents = max(1, maximumDeferredObservationEvents)
     }
 
     public convenience init(
@@ -88,14 +98,36 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         await loggingTail?.value
     }
 
+    public func beginObservationClear() async -> ObservationClearBoundary {
+        if let activeObservationClearBoundary {
+            return activeObservationClearBoundary
+        }
+
+        observationGeneration &+= 1
+        let boundary = ObservationClearBoundary(generation: observationGeneration)
+        activeObservationClearBoundary = boundary
+        deferredObservationEvents.removeAll(keepingCapacity: true)
+        await flushObservationLogging()
+        return boundary
+    }
+
+    public func endObservationClear(_ boundary: ObservationClearBoundary) {
+        guard activeObservationClearBoundary == boundary else { return }
+        let events = deferredObservationEvents
+        deferredObservationEvents.removeAll(keepingCapacity: true)
+        activeObservationClearBoundary = nil
+        enqueueObservationEvents(events)
+    }
+
     private func enqueue(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {
         let predecessor = transitionTask
+        let inputObservationGeneration = observationGeneration
         transitionSequence += 1
         let sequence = transitionSequence
         let task = Task { @MainActor [weak self] in
             await predecessor?.value
             guard let self else { return SpeakerRecoveryOutcome.failedSafetyUnknown }
-            return await self.process(input)
+            return await self.process(input, observationGeneration: inputObservationGeneration)
         }
         transitionTask = Task { _ = await task.value }
         let outcome = await task.value
@@ -103,15 +135,18 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         return outcome
     }
 
-    private func process(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {
+    private func process(
+        _ input: ProtectionCoordinatorInput,
+        observationGeneration: UInt64
+    ) async -> SpeakerRecoveryOutcome {
         bufferedObservationEvents = []
         guard let prepared = prepare(input) else {
-            enqueueBufferedObservationEvents()
+            enqueueBufferedObservationEvents(generation: observationGeneration)
             return .noPendingRecovery
         }
         let outcome = await protection.apply(prepared.action)
         complete(prepared.completion, outcome: outcome)
-        enqueueBufferedObservationEvents()
+        enqueueBufferedObservationEvents(generation: observationGeneration)
         return outcome
     }
 
@@ -396,9 +431,25 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         onEvent?(event)
     }
 
-    private func enqueueBufferedObservationEvents() {
+    private func enqueueBufferedObservationEvents(generation: UInt64) {
         let events = bufferedObservationEvents ?? []
         bufferedObservationEvents = nil
+        guard !events.isEmpty else { return }
+
+        if activeObservationClearBoundary?.generation == generation {
+            deferredObservationEvents.append(contentsOf: events)
+            if deferredObservationEvents.count > maximumDeferredObservationEvents {
+                deferredObservationEvents.removeFirst(
+                    deferredObservationEvents.count - maximumDeferredObservationEvents
+                )
+            }
+            return
+        }
+
+        enqueueObservationEvents(events)
+    }
+
+    private func enqueueObservationEvents(_ events: [LidMuteEvent]) {
         guard !events.isEmpty else { return }
 
         let predecessor = observationLoggingTask

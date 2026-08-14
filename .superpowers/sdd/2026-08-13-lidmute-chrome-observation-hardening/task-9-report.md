@@ -137,3 +137,47 @@ The injected coordinator seam now represents the whole observation pipeline: Chr
 
 - The transition and persistence races use deterministic continuations rather than a live stalled speaker driver or saturated disk.
 - No installed Chrome extension, real Application Support data, or live speaker state was modified. No UI layout changes were made.
+
+## Review fix round 3
+
+### Result
+
+Observation clear no longer suppresses or delays speaker-safety inputs. `ProtectionCoordinator.beginObservationClear()` first advances the observation generation and installs an active logging boundary, then fences and drains all pre-boundary transitions and their logging tail. Safety transitions submitted after that boundary continue through the existing transition FIFO and call `protection.apply` immediately; only their new-generation observation events are deferred in memory. The deferred queue retains the newest 5,000 events, matching the persistent timeline bound.
+
+App persistent clear now runs in a utility detached task, leaving `MainActor` available for physical-lid, route, simulation, night, enable/disable, and audio safety work. The blanket clear guard was removed from the protection-event queue. Route observation epoch checks now gate only Chrome timer restart; route safety always reaches the coordinator when lifecycle recovery is ready. Physical lid delivery and latest-lid replay use the same injected coordinator pipeline as route changes.
+
+After a successful or partially successful clear, App resets old presentation and ends the boundary, serially publishing the deferred post-boundary evidence after the cleared logging tail. If persistent clear throws, App reports the storage failure and still ends the boundary, so deferred safety logging cannot remain permanently paused. Chrome evidence remains epoch-rejected during clear.
+
+### RED / GREEN evidence
+
+#### Route safety during slow clear
+
+- RED: the revised existing route-clear integration test paused the actual `ObservationClearing` call. With synchronous clear on `MainActor`, the recorded order was `clear.released` before `protection.route`; the route callback could not apply protection during the clear window.
+- GREEN: persistent clear runs off actor, the route callback is not rejected by clear or observation epoch state, and `protection.route` occurs while clear remains paused. The route action count is exactly one after clear, with the coordinator still `.protecting`.
+
+#### Physical-lid safety and post-boundary evidence
+
+- RED: the App physical-lid test observed zero `.begin` actions on the injected real coordinator, final state `.armed`, and no lid evidence, because lid delivery still bypassed the shared pipeline seam.
+- GREEN: a physical close received during paused clear invokes `.begin` before clear releases, exactly once. Clear removes the pre-boundary `.protectionEnabled` evidence; after boundary end, the deferred `[.lidClosed, .muteEnforced]` events are persisted and published, and the coordinator remains `.protecting`.
+
+#### Bounded and failure-safe deferred logging
+
+- RED: the bounded-buffer test failed to compile because the coordinator exposed no configurable deferred-event capacity.
+- GREEN: with capacity three, four post-boundary events perform no disk writes during the boundary and release only the newest `[.muteEnforced, .lidOpened, .restored]` events afterward. Production defaults to 5,000.
+- Failure coverage: when the paused persistent clear throws after a physical close has already applied, App still ends the boundary. The coordinator stays `.protecting`, deferred lid evidence is logged, and storage failure presentation is nonempty.
+
+### Review-round verification
+
+- Focused Swift regression filter (`AppViewModelObservationTests|ObservationClearTests|ProtectionCoordinatorJournalIntegrationTests|ProtectionRouteRetryTests|ApplicationLifecycleCoordinatorTests`): 20 XCTest tests and 16 Swift Testing tests passed.
+- Full Swift verification: 118 XCTest tests and 24 Swift Testing tests passed.
+- `node --test ChromeExtension/service-worker.test.mjs`: 7 passed, 0 failed.
+- `bash Scripts/check-visual-principles.sh`: `PASS visual principle source checks`.
+- `Scripts/make-app-bundle.sh`: fresh Swift build, resource assembly, stale-binary check, icon generation, and ad-hoc signing passed.
+- `Scripts/run-smoke-check.sh` with an existing explicit `TMPDIR`: full Swift and Node suites, visual checks, build, signing, and bundle creation exited successfully.
+- Required source scan returned zero matches for silent JSON corruption skipping, whole-inbox App reads, per-callback history reloads, or sorted dedup suffixes.
+- `git diff --check`: clean.
+
+### Review-round manual gaps
+
+- Slow and failed clear behavior uses a deterministic test store rather than a live saturated disk or revoked Application Support permissions.
+- No installed Chrome extension, real Application Support data, or live speaker state was modified. No UI layout changes were made.

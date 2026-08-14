@@ -157,6 +157,33 @@ private final class PausingObservationEventStore: EventStoring, @unchecked Senda
 
 @MainActor
 final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
+    func testObservationClearDefersOnlyNewestBoundedEventsUntilBoundaryEnds() async throws {
+        let protection = PausingRouteProtectionApplying()
+        let store = PausingPipelineEventStore()
+        let coordinator = ProtectionCoordinator(
+            protection: protection,
+            processEvidence: ScriptedAudioController(),
+            store: store,
+            maximumDeferredObservationEvents: 3
+        )
+        await coordinator.setEnabled(true)
+        await coordinator.flushObservationLogging()
+
+        let boundary = await coordinator.beginObservationClear()
+        try store.clear()
+        await coordinator.receivePhysicalLid(closed: true)
+        await coordinator.receivePhysicalLid(closed: false)
+        XCTAssertTrue(try store.load().isEmpty)
+
+        coordinator.endObservationClear(boundary)
+        await coordinator.flushObservationLogging()
+
+        XCTAssertEqual(
+            try store.load().map(\.kind),
+            [.muteEnforced, .lidOpened, .restored]
+        )
+    }
+
     func testObservationFlushWaitsForInFlightTransitionAndItsLoggingTail() async throws {
         let protection = PausingRouteProtectionApplying()
         let store = PausingPipelineEventStore()
