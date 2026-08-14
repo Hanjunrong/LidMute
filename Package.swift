@@ -27,6 +27,6 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
             ]
         ),
-        .executableTarget(name: "LidMuteNativeHost"),
+        .executableTarget(name: "LidMuteNativeHost", dependencies: ["LidMuteCore"]),
     ]
 )

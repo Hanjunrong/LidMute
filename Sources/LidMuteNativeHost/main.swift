@@ -1,71 +1,61 @@
 import Foundation
+import LidMuteCore
 
-let appDirectory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+private let fileManager = FileManager.default
+private let appDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     .appending(path: "LidMute", directoryHint: .isDirectory)
-let inboxURL = appDirectory.appending(path: "chrome-inbox.jsonl")
-let originURL = appDirectory.appending(path: "chrome-origin.txt")
+private let originURL = appDirectory.appending(path: "chrome-origin.txt")
+private let pidURL = appDirectory.appending(path: "chrome-host.pid")
 
-try FileManager.default.createDirectory(at: appDirectory, withIntermediateDirectories: true)
-let expectedOrigin = (try? String(contentsOf: originURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines))
-let actualOrigin = CommandLine.arguments.dropFirst().first ?? ""
+do {
+    try fileManager.createDirectory(at: appDirectory, withIntermediateDirectories: true)
+    try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: appDirectory.path)
 
-guard !actualOrigin.isEmpty, actualOrigin == expectedOrigin else {
-    fputs("LidMute rejected unregistered Chrome extension origin.\n", stderr)
-    exit(2)
-}
-
-// Write PID for Chrome connection health detection
-let pidURL = appDirectory.appending(path: "chrome-host.pid")
-try? Data("\(ProcessInfo.processInfo.processIdentifier)".utf8).write(to: pidURL)
-
-var buffer = Data()
-while true {
-    let chunk = FileHandle.standardInput.availableData
-    guard !chunk.isEmpty else { break }
-    buffer.append(chunk)
-
-    while buffer.count >= 4 {
-        let length = buffer.prefix(4).withUnsafeBytes { raw in
-            UInt32(littleEndian: raw.loadUnaligned(as: UInt32.self))
-        }
-        guard length <= 262_144 else {
-            fputs("LidMute rejected oversized native message.\n", stderr)
-            exit(3)
-        }
-        let total = 4 + Int(length)
-        guard buffer.count >= total else { break }
-
-        let payload = buffer.subdata(in: 4..<total)
-        buffer.removeSubrange(0..<total)
-        try append(payload, to: inboxURL)
-        try sendAcknowledgement(for: payload)
+    let expectedOrigin = try String(contentsOf: originURL, encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    let actualOrigin = CommandLine.arguments.dropFirst().first ?? ""
+    guard !actualOrigin.isEmpty, actualOrigin == expectedOrigin else {
+        fail("origin_rejected", status: 2)
     }
-}
 
-private func append(_ data: Data, to url: URL) throws {
-    if !FileManager.default.fileExists(atPath: url.path) {
-        FileManager.default.createFile(atPath: url.path, contents: nil)
+    try writePrivate(Data("\(ProcessInfo.processInfo.processIdentifier)".utf8), to: pidURL)
+
+    let paths = ObservationPaths(root: appDirectory)
+    let store = ObservationStore(paths: paths)
+    let session = NativeHostSession(acceptor: store)
+
+    while true {
+        let chunk = FileHandle.standardInput.availableData
+        guard !chunk.isEmpty else { break }
+        for acknowledgement in try session.receive(chunk) {
+            try writeNativeMessage(acknowledgement)
+        }
     }
-    let handle = try FileHandle(forWritingTo: url)
-    defer { try? handle.close() }
-    try handle.seekToEnd()
-    handle.write(data)
-    handle.write(Data([0x0A]))
+
+    guard session.bufferedByteCount == 0 else {
+        fail("partial_frame_at_eof", status: 3)
+    }
+} catch NativeMessageFramingError.frameTooLarge {
+    fail("frame_too_large", status: 3)
+} catch NativeHostProtocolError.unaddressableMalformedFrame {
+    fail("unaddressable_malformed_frame", status: 3)
+} catch {
+    fail("native_host_failure", status: 4)
 }
 
-private func sendAcknowledgement(for payload: Data) throws {
-    let object = (try? JSONSerialization.jsonObject(with: payload) as? [String: Any]) ?? [:]
-    let response: [String: Any] = [
-        "v": 1,
-        "type": "ack",
-        "eventId": object["eventId"] as? String ?? "",
-        "status": "accepted",
-        "disposition": "observed",
-        "appConnected": true,
-        "receivedAt": ISO8601DateFormatter().string(from: Date()),
-    ]
-    let data = try JSONSerialization.data(withJSONObject: response)
-    var length = UInt32(data.count).littleEndian
+private func writeNativeMessage(_ acknowledgement: ChromeAcknowledgement) throws {
+    let payload = try JSONEncoder().encode(acknowledgement)
+    var length = UInt32(payload.count).littleEndian
     FileHandle.standardOutput.write(Data(bytes: &length, count: MemoryLayout<UInt32>.size))
-    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(payload)
+}
+
+private func writePrivate(_ data: Data, to url: URL) throws {
+    try data.write(to: url, options: .atomic)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+}
+
+private func fail(_ reason: StaticString, status: Int32) -> Never {
+    fputs("\(reason)\n", stderr)
+    exit(status)
 }

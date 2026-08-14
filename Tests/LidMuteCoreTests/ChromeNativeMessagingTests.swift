@@ -111,6 +111,97 @@ final class ChromeNativeMessagingTests: XCTestCase {
         }
     }
 
+    func testHostAcknowledgesEachTerminalStoreDisposition() throws {
+        let cases: [(ChromeAcceptDisposition, ChromeAckDisposition)] = [
+            (.accepted(eventID), .accepted),
+            (.duplicate(eventID), .duplicate),
+            (.ignoredIncognito(eventID), .ignoredIncognito),
+        ]
+
+        for (storeDisposition, acknowledgementDisposition) in cases {
+            let acceptor = FakeChromeAcceptor(result: .success(storeDisposition))
+            let acknowledgements = try NativeHostSession(acceptor: acceptor).receive(wire(validPayload()))
+
+            XCTAssertEqual(
+                acknowledgements,
+                [ChromeAcknowledgement(eventID: eventID, disposition: acknowledgementDisposition)]
+            )
+            XCTAssertEqual(acceptor.acceptCount, 1)
+        }
+    }
+
+    func testHostReturnsRetryableFailureWhenDurabilityFails() throws {
+        let acceptor = FakeChromeAcceptor(result: .failure(.retryablePersistenceFailure))
+
+        let acknowledgement = try XCTUnwrap(
+            NativeHostSession(acceptor: acceptor).receive(wire(validPayload())).only
+        )
+        XCTAssertEqual(acknowledgement.eventID, eventID)
+        XCTAssertEqual(acknowledgement.disposition, .retryableFailure)
+    }
+
+    func testHostReturnsRetryableFailureForCorruptStoreHealth() throws {
+        let acceptor = FakeChromeAcceptor(result: .failure(.corruptMetadata("chrome-dedup.json")))
+
+        let acknowledgement = try XCTUnwrap(
+            NativeHostSession(acceptor: acceptor).receive(wire(validPayload())).only
+        )
+        XCTAssertEqual(acknowledgement.eventID, eventID)
+        XCTAssertEqual(acknowledgement.disposition, .retryableFailure)
+    }
+
+    func testHostPermanentlyRejectsValidBoundedIDWithBadSchemaWithoutCallingStore() throws {
+        let bad = replacing("\"audible\":true", with: "\"audible\":false")
+        let acceptor = FakeChromeAcceptor.neverCalled
+
+        let acknowledgement = try XCTUnwrap(
+            NativeHostSession(acceptor: acceptor).receive(wire(bad)).only
+        )
+        XCTAssertEqual(
+            acknowledgement,
+            ChromeAcknowledgement(eventID: eventID, disposition: .rejectedPermanent)
+        )
+        XCTAssertEqual(acceptor.acceptCount, 0)
+    }
+
+    func testHostDisconnectsMalformedFrameWithoutSafeEventID() {
+        let acceptor = FakeChromeAcceptor.neverCalled
+
+        XCTAssertThrowsError(
+            try NativeHostSession(acceptor: acceptor).receive(wire(Data("not-json".utf8)))
+        ) { error in
+            XCTAssertEqual(error as? NativeHostProtocolError, .unaddressableMalformedFrame)
+        }
+        XCTAssertEqual(acceptor.acceptCount, 0)
+    }
+
+    func testHostWaitsForCompleteFrameWithoutAcknowledgingRemainder() throws {
+        let acceptor = FakeChromeAcceptor(result: .success(.accepted(eventID)))
+        let session = NativeHostSession(acceptor: acceptor)
+        let framed = wire(validPayload())
+
+        XCTAssertTrue(try session.receive(framed.dropLast()).isEmpty)
+        XCTAssertGreaterThan(session.bufferedByteCount, 0)
+        XCTAssertEqual(acceptor.acceptCount, 0)
+        XCTAssertEqual(
+            try session.receive(framed.suffix(1)),
+            [ChromeAcknowledgement(eventID: eventID, disposition: .accepted)]
+        )
+    }
+
+    func testAcknowledgementJSONUsesOnlyTheDispositionContract() throws {
+        let acknowledgement = ChromeAcknowledgement(eventID: eventID, disposition: .ignoredIncognito)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(acknowledgement)) as? [String: Any]
+        )
+
+        XCTAssertEqual(Set(object.keys), ["v", "type", "eventId", "disposition"])
+        XCTAssertEqual(object["v"] as? Int, 1)
+        XCTAssertEqual(object["type"] as? String, "ack")
+        XCTAssertEqual(object["eventId"] as? String, eventID.uuidString)
+        XCTAssertEqual(object["disposition"] as? String, "ignored_incognito")
+    }
+
     private func validPayload(incognito: Bool = false, eventIDText: String? = nil) -> Data {
         Data(#"{"v":1,"type":"tab_audio_started","eventId":"\#(eventIDText ?? eventID.uuidString)","extensionSessionId":"\#(sessionID.uuidString)","seq":"7","sentAt":"2026-08-13T00:00:00Z","tab":{"windowId":1,"tabId":2,"index":0,"title":"搜索","url":"https://example.com/watch?q=secret#chapter","status":"complete","audible":true,"muted":{"value":false,"reason":null,"extensionId":null},"active":true,"pinned":false,"incognito":\#(incognito)}}"#.utf8)
     }
@@ -119,4 +210,26 @@ final class ChromeNativeMessagingTests: XCTestCase {
         let text = String(decoding: validPayload(), as: UTF8.self)
         return Data(text.replacingOccurrences(of: target, with: replacement).utf8)
     }
+}
+
+private final class FakeChromeAcceptor: ChromeFrameAccepting, @unchecked Sendable {
+    static var neverCalled: FakeChromeAcceptor {
+        FakeChromeAcceptor(result: .success(.accepted(UUID())))
+    }
+
+    private let result: Result<ChromeAcceptDisposition, ObservationStoreError>
+    private(set) var acceptCount = 0
+
+    init(result: Result<ChromeAcceptDisposition, ObservationStoreError>) {
+        self.result = result
+    }
+
+    func accept(_ frame: ChromeValidatedFrame) throws -> ChromeAcceptDisposition {
+        acceptCount += 1
+        return try result.get()
+    }
+}
+
+private extension Array {
+    var only: Element? { count == 1 ? first : nil }
 }
