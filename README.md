@@ -28,19 +28,30 @@ LidMute 是一款 macOS 菜单栏小工具。它会在 MacBook 合盖时守住�
 
 ## 安装
 
-目前项目暂未提供经过 Apple 签名的安装包，需要从源码构建。只需在“终端”中依次运行下面的命令：
+默认构建的是仅供本机验收的 ad-hoc 签名包。它没有经过 Apple 公证，不能作为公开发行包。只需在“终端”中依次运行下面的命令：
 
 ```zsh
 xcode-select --install
 git clone https://github.com/Hanjunrong/LidMute.git
 cd LidMute
-zsh Scripts/make-app-bundle.sh
+LIDMUTE_SIGNING_MODE=adhoc zsh Scripts/make-app-bundle.sh
 open dist/LidMute.app
 ```
 
 如果已经安装过 Xcode Command Line Tools，第一条命令可以跳过。构建完成后，应用位于 `dist/LidMute.app`，可以把它拖入“应用程序”文件夹。
 
 首次打开时如果 macOS 提示无法验证开发者，请在 Finder 中右键点击 LidMute，选择“打开”，再确认一次。
+
+需要公开发行时，必须在已配置发行凭据的机器上提供完整且精确的 Developer ID Application identity 与 `notarytool` 钥匙串 profile：
+
+```zsh
+LIDMUTE_SIGNING_MODE=developer-id \
+LIDMUTE_DEVELOPER_IDENTITY='Developer ID Application: <名称> (<TEAMID>)' \
+LIDMUTE_NOTARY_PROFILE='<已存在的 notarytool profile>' \
+zsh Scripts/make-app-bundle.sh
+```
+
+Developer ID 模式的每次构建都强制使用 hardened runtime、时间戳、Apple 公证和 stapling；identity、profile、公证或 stapling 任一步失败都会停止，不会回退到 ad-hoc。版本号只在 `Config/Version.plist` 中更新。
 
 ## 使用方法
 
@@ -59,6 +70,13 @@ open dist/LidMute.app
 
 模拟合盖、模拟开盖、夜间时段和事件记录都在主窗口中。它们适合在不真正合盖的情况下检查保护是否生效。
 
+## 健康状态
+
+- “当前没有活动音频”表示系统已成功检查且当前没有发声来源，是健康状态，不是故障。
+- CoreAudio、合盖传感器或本地存储的失败会分别显示，不会伪装成“没有活动音频”。
+- “Chrome 已连接”要求 native host heartbeat 有效且不超过 6 秒；heartbeat 每 2 秒刷新一次。
+- 移动 LidMute.app 后，Chrome manifest 里的 native host 路径可能失配。此时可使用应用内的“修复 Chrome 通信路径”一键修复，再刷新扩展。
+
 ## Chrome 标签页记录（可选）
 
 不安装 Chrome 扩展也能使用合盖静音保护。扩展只用于帮助你确认是哪个 Chrome 标签页产生了声音。
@@ -71,7 +89,9 @@ open dist/LidMute.app
 4. 将 Chrome 显示的扩展 ID 填回 LidMute，并点击注册。
 5. 刷新扩展，直到 LidMute 显示“Chrome 已连接”。
 
-扩展只读取标签页标题、地址和是否发声等信息，记录保存在本机，不会上传到远程服务器。
+普通窗口中正在发声的标签页会把完整 URL 保存在本机，包括 query 与 fragment；其中可能包含搜索词、标识符或 token。记录不会上传到远程服务器。隐身窗口的标签页级证据会被忽略，绝不持久化或写入日志。
+
+主界面的“清空”会删除事件和标签页观察数据，但保留 Chrome 注册信息，因此不需要重新注册扩展。
 
 ## 常见问题
 
@@ -94,9 +114,14 @@ open dist/LidMute.app
 ## 隐私与限制
 
 - 不读取网页正文，不注入网页脚本，也不拦截网络请求。
+- 普通窗口发声标签页的完整 URL（包括 query 与 fragment）会保存在本机，可能包含搜索词、标识符或 token。
+- 隐身窗口的标签页标题、URL、原始 frame 和标签页证据会被忽略，绝不持久化或记录到日志。
+- “清空”删除观察数据，但保留 Chrome 注册。
 - 不会主动结束浏览器或播放器进程。
 - Chrome 标签页级记录依赖可选的 Chrome 扩展；其他浏览器只能显示系统能够识别到的进程级信息。
 - 系统媒体暂停请求由 macOS 决定交给哪个播放器处理，因此静音保护仍是最终保障。
+
+公开发行前仍必须完成真实 MacBook 合盖/开盖与屏幕休眠、内建与蓝牙/USB/显示器音频路由切换，以及一台干净 macOS 15 或更高版本机器上的 Gatekeeper 验收。自动化测试或本地 ad-hoc 包不能替代这些步骤。
 
 ## 开源协议
 
