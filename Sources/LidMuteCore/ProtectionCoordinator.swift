@@ -8,7 +8,9 @@ public struct ObservationClearBoundary: Equatable, Sendable {
 public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> {
     public private(set) var state: ProtectionState = .inactive
     public private(set) var isEnabled = false
+    public private(set) var latestChromeEvidence: ChromeTabEvidence?
     public var onEvent: ((LidMuteEvent) -> Void)?
+    public var onStorageHealth: ((ObservationStorageHealth) -> Void)?
 
     private let protection: Protection
     private let processEvidence: any AudioProcessEvidenceProviding
@@ -26,6 +28,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     private var observationGeneration: UInt64 = 0
     private var activeObservationClearBoundary: ObservationClearBoundary?
     private var deferredObservationEvents: [LidMuteEvent] = []
+    private var lastStorageHealth: ObservationStorageHealth = .healthy
     private let maximumDeferredObservationEvents: Int
 
     public init(
@@ -71,8 +74,9 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         _ = await enqueue(.audioSnapshot(processes))
     }
 
-    public func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async {
-        _ = await enqueue(.chromeEvidence(evidence))
+    @discardableResult
+    public func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async -> SpeakerRecoveryOutcome {
+        await enqueue(.chromeEvidence(evidence))
     }
 
     public func receiveAudioRouteChanged() async {
@@ -282,6 +286,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
 
     private func prepareChromeEvidence(_ evidence: ChromeTabEvidence) -> PreparedProtectionAction? {
         guard isEnabled else { return nil }
+        latestChromeEvidence = evidence
         let chromeProcess: AudioProcess?
         do {
             chromeProcess = try processEvidence.activeOutputProcesses().first {
@@ -295,14 +300,6 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
             record(.error, "无法读取系统音频进程：\(error.localizedDescription)")
         }
         let correlation: CorrelationStatus = chromeProcess == nil ? .browserObservedOnly : .systemMatched
-        record(
-            .chromeTabAudible,
-            "Chrome 标签页开始发声：\(evidence.title)",
-            process: chromeProcess,
-            chromeTab: evidence,
-            correlation: correlation
-        )
-
         guard state == .protecting else { return nil }
         return PreparedProtectionAction(
             action: .reinforce,
@@ -397,6 +394,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         if !preservingSimulation { observedSimulation = nil }
         activeOutputPIDs.removeAll()
         lastSilenceError = nil
+        latestChromeEvidence = nil
     }
 
     private func record(
@@ -425,8 +423,9 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     private func persistSynchronously(_ event: LidMuteEvent) {
         do {
             try store.append(event)
+            publishStorageHealth(.healthy)
         } catch {
-            // Event logging is observational and cannot relax speaker safety.
+            publishStorageHealth(Self.storageHealth(for: error))
         }
         onEvent?(event)
     }
@@ -457,11 +456,14 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         let task = Task.detached(priority: .utility) { [weak self] in
             await predecessor?.value
             for event in events {
+                let health: ObservationStorageHealth
                 do {
                     try store.append(event)
+                    health = .healthy
                 } catch {
-                    // Event logging is observational and cannot relax speaker safety.
+                    health = Self.storageHealth(for: error)
                 }
+                await self?.publishStorageHealth(health)
                 await self?.publishLoggedEvent(event)
             }
         }
@@ -470,6 +472,24 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
 
     private func publishLoggedEvent(_ event: LidMuteEvent) {
         onEvent?(event)
+    }
+
+    private func publishStorageHealth(_ health: ObservationStorageHealth) {
+        guard health != lastStorageHealth else { return }
+        lastStorageHealth = health
+        onStorageHealth?(health)
+    }
+
+    nonisolated private static func storageHealth(for error: Error) -> ObservationStorageHealth {
+        guard let error = error as? EventStoreError else {
+            return .ioFailure(String(describing: error))
+        }
+        return switch error {
+        case let .corruptRecord(line): .corruptRecord(line: line)
+        case .permissionFailure: .permissionFailure
+        case .capacityFailure: .capacityFailure
+        case let .ioFailure(message): .ioFailure(message)
+        }
     }
 }
 
@@ -546,7 +566,8 @@ extension ProtectionCoordinator where Protection: SynchronousSpeakerProtectionAp
         applySynchronously(.audioSnapshot(processes))
     }
 
-    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) {
+    @discardableResult
+    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) -> SpeakerRecoveryOutcome {
         applySynchronously(.chromeEvidence(evidence))
     }
 
@@ -554,8 +575,11 @@ extension ProtectionCoordinator where Protection: SynchronousSpeakerProtectionAp
         applySynchronously(.audioRouteChanged)
     }
 
-    private func applySynchronously(_ input: ProtectionCoordinatorInput) {
-        guard let prepared = prepare(input) else { return }
-        complete(prepared.completion, outcome: protection.applySynchronously(prepared.action))
+    @discardableResult
+    private func applySynchronously(_ input: ProtectionCoordinatorInput) -> SpeakerRecoveryOutcome {
+        guard let prepared = prepare(input) else { return .noPendingRecovery }
+        let outcome = protection.applySynchronously(prepared.action)
+        complete(prepared.completion, outcome: outcome)
+        return outcome
     }
 }

@@ -40,12 +40,16 @@ public struct EventStoreBatchAppendResult: Sendable {
 }
 
 public final class BoundedJSONLineEventStore: EventStoring, @unchecked Sendable {
-    public private(set) var health: ObservationStorageHealth = .healthy
+    public var health: ObservationStorageHealth {
+        healthLock.withLock { storedHealth }
+    }
 
     private let url: URL
     private let maximumCount: Int
     private let fileSystem: any ObservationFileSystem
     private let lock: any ObservationLocking
+    private let healthLock = NSLock()
+    private var storedHealth: ObservationStorageHealth = .healthy
 
     public init(
         url: URL,
@@ -112,8 +116,15 @@ public final class BoundedJSONLineEventStore: EventStoring, @unchecked Sendable 
         try performStorageOperation {
             try lock.withExclusiveLock {
                 let events = try decodeEvents(fileSystem.read(url))
+                let retained: [LidMuteEvent]
+                if events.count > maximumCount {
+                    retained = maximumCount == 0 ? [] : Array(events.suffix(maximumCount))
+                    try persist(retained)
+                } else {
+                    retained = events
+                }
                 guard limit > 0 else { return [] }
-                return Array(events.suffix(min(limit, maximumCount)))
+                return Array(retained.suffix(min(limit, maximumCount)))
             }
         }
     }
@@ -168,16 +179,20 @@ public final class BoundedJSONLineEventStore: EventStoring, @unchecked Sendable 
     private func performStorageOperation<T>(_ body: () throws -> T) throws -> T {
         do {
             let result = try body()
-            health = .healthy
+            setHealth(.healthy)
             return result
         } catch let error as EventStoreError {
-            health = error.health
+            setHealth(error.health)
             throw error
         } catch {
             let mapped = EventStoreError(storageError: error)
-            health = mapped.health
+            setHealth(mapped.health)
             throw mapped
         }
+    }
+
+    private func setHealth(_ health: ObservationStorageHealth) {
+        healthLock.withLock { storedHealth = health }
     }
 }
 

@@ -40,6 +40,10 @@ private final class CursorFailingFileSystem: ObservationFileSystem, @unchecked S
         )
     }
 
+    func truncateIncompleteFinalLine(_ url: URL) throws -> Bool {
+        try base.truncateIncompleteFinalLine(url)
+    }
+
     func coordinatedAppend(_ data: Data, to url: URL) throws {
         try base.coordinatedAppend(data, to: url)
     }
@@ -189,6 +193,52 @@ func cursorCommitFailureReplaysWithoutTimelineDuplicateAfterRestart() throws {
 }
 
 @Test
+func committedCursorCannotLosePendingSafetyDeliveryAcrossRestart() throws {
+    try withConsumerFixture { fixture in
+        let record = fixture.record(eventID: UUID(), generation: 0)
+        try fixture.appendRecord(record)
+
+        let first = try fixture.consumer.consumeAvailable()
+        let deliveryID = try #require(first.deliveryID)
+        #expect(first.records == [record])
+        #expect(!(try fixture.fileSystem.read(fixture.paths.pendingDelivery)).isEmpty)
+
+        let restarted = fixture.makeConsumer()
+        let replay = try restarted.consumeAvailable()
+        #expect(replay.deliveryID == deliveryID)
+        #expect(replay.records == [record])
+        #expect(try fixture.events.recent(limit: 10).count == 1)
+
+        try restarted.acknowledgeDelivery(deliveryID)
+        #expect((try fixture.fileSystem.read(fixture.paths.pendingDelivery)).isEmpty)
+        #expect(try restarted.consumeAvailable().records.isEmpty)
+    }
+}
+
+@Test
+func pendingSafetyDeliverySurvivesCursorCommitFailureAndAckAdvancesCursor() throws {
+    try withConsumerFixture { fixture in
+        let record = fixture.record(eventID: UUID(), generation: 0)
+        try fixture.appendRecord(record)
+        fixture.fileSystem.failNextCursorWrite = true
+
+        #expect(throws: ChromeConsumeError.cursorCommitFailure) {
+            try fixture.consumer.consumeAvailable()
+        }
+        #expect(!(try fixture.fileSystem.read(fixture.paths.pendingDelivery)).isEmpty)
+
+        let restarted = fixture.makeConsumer()
+        let replay = try restarted.consumeAvailable()
+        let deliveryID = try #require(replay.deliveryID)
+        #expect(replay.records == [record])
+        try restarted.acknowledgeDelivery(deliveryID)
+
+        #expect(try restarted.consumeAvailable().records.isEmpty)
+        #expect(try fixture.events.recent(limit: 10).map(\.observationEventID) == [record.eventID])
+    }
+}
+
+@Test
 func consumerAppendsACompleteBatchWithOneEventRewrite() throws {
     try withConsumerFixture { fixture in
         let first = fixture.record(eventID: UUID(), generation: 0, title: "first")
@@ -221,7 +271,8 @@ func inboxReplacementResetsOffsetAndUsesEventIDIdempotency() throws {
     try withConsumerFixture { fixture in
         let old = fixture.record(eventID: UUID(), generation: 0, title: "old")
         try fixture.appendRecord(old)
-        _ = try fixture.consumer.consumeAvailable()
+        let first = try fixture.consumer.consumeAvailable()
+        try fixture.consumer.acknowledgeDelivery(try #require(first.deliveryID))
 
         let new = fixture.record(eventID: UUID(), generation: 0, title: "new")
         try fixture.replaceInbox(with: [old, new])

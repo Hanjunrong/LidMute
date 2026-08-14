@@ -270,7 +270,7 @@ final class ExistingBehaviorTests: XCTestCase {
     }
 
     @MainActor
-    func testTimelineRecordsOnlyWhileGuardIsEnabled() throws {
+    func testCoordinatorLeavesChromeTimelineOwnershipToInboxConsumer() throws {
         let store = MemoryEventStore()
         let coordinator = ProtectionCoordinator(audio: FakeAudioController(), store: store)
         let evidence = ChromeTabEvidence(
@@ -292,9 +292,9 @@ final class ExistingBehaviorTests: XCTestCase {
 
         coordinator.setEnabled(true)
         coordinator.receiveChromeEvidence(evidence)
-        XCTAssertTrue(store.events.count == 2)
+        XCTAssertTrue(store.events.count == 1)
         XCTAssertTrue(store.events[0].kind == .protectionEnabled)
-        XCTAssertTrue(store.events[1].kind == .chromeTabAudible)
+        XCTAssertEqual(coordinator.latestChromeEvidence, evidence)
 
         coordinator.setEnabled(false)
         let countAfterDisable = store.events.count

@@ -55,3 +55,21 @@ func corruptionIsReportedInsteadOfSilentlySkipped() throws {
         #expect(store.health == .corruptRecord(line: 1))
     }
 }
+
+@Test
+func reopeningLegacyOversizedHistoryCompactsOnRecentWithoutANewAppend() throws {
+    try withTemporaryDirectory { root in
+        let url = root.appending(path: "events.jsonl")
+        try seedEvents(0..<10_000, at: url)
+        let reopened = BoundedJSONLineEventStore(url: url, maximumCount: 5_000)
+
+        let recent = try reopened.recent(limit: 100)
+
+        #expect(recent.first?.sequence == 9_900)
+        #expect(recent.last?.sequence == 9_999)
+        let persistedLines = try Data(contentsOf: url).split(separator: 0x0A)
+        #expect(persistedLines.count == 5_000)
+        #expect(try JSONDecoder().decode(LidMuteEvent.self, from: Data(persistedLines[0])).sequence == 5_000)
+        #expect(try JSONDecoder().decode(LidMuteEvent.self, from: Data(persistedLines[4_999])).sequence == 9_999)
+    }
+}

@@ -8,6 +8,7 @@ public struct ObservationPaths: Sendable {
     public let inbox: URL
     public let dedup: URL
     public let cursor: URL
+    public let pendingDelivery: URL
     public let events: URL
 
     public init(root: URL) {
@@ -17,6 +18,7 @@ public struct ObservationPaths: Sendable {
         inbox = root.appending(path: "chrome-inbox.jsonl")
         dedup = root.appending(path: "chrome-dedup.json")
         cursor = root.appending(path: "chrome-cursor.json")
+        pendingDelivery = root.appending(path: "chrome-pending-delivery.json")
         events = root.appending(path: "events.jsonl")
     }
 }
@@ -33,6 +35,7 @@ public protocol ObservationFileSystem: Sendable {
         maximumCount: Int,
         maximumLineBytes: Int
     ) throws -> [Data]
+    func truncateIncompleteFinalLine(_ url: URL) throws -> Bool
     func coordinatedAppend(_ data: Data, to url: URL) throws
     func atomicWrite(_ data: Data, to url: URL, permissions: Int16) throws
     func syncFile(_ url: URL) throws
@@ -80,6 +83,7 @@ public enum ObservationClearCategory: String, Codable, Equatable, Sendable {
     case inbox
     case deduplication
     case cursor
+    case pendingDelivery = "pending_delivery"
     case memory
 }
 
@@ -335,6 +339,60 @@ public struct POSIXObservationFileSystem: ObservationFileSystem, Sendable {
         try writeAll(data, to: descriptor)
     }
 
+    public func truncateIncompleteFinalLine(_ url: URL) throws -> Bool {
+        let descriptor = open(url.path, O_RDWR | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return false }
+            throw POSIXObservationError.current
+        }
+        defer { Darwin.close(descriptor) }
+
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0 else { throw POSIXObservationError.current }
+        guard metadata.st_size > 0 else { return false }
+
+        var lastByte: UInt8 = 0
+        var lastByteRead: Int
+        repeat {
+            lastByteRead = pread(descriptor, &lastByte, 1, metadata.st_size - 1)
+        } while lastByteRead < 0 && errno == EINTR
+        guard lastByteRead == 1 else { throw POSIXObservationError.current }
+        guard lastByte != 0x0A else { return false }
+
+        let chunkSize = 64 * 1_024
+        var position = metadata.st_size
+        var retainedLength: off_t = 0
+        while position > 0 {
+            let byteCount = min(chunkSize, Int(position))
+            position -= off_t(byteCount)
+            var bytes = [UInt8](repeating: 0, count: byteCount)
+            var bytesRead = 0
+            try bytes.withUnsafeMutableBytes { buffer in
+                guard let baseAddress = buffer.baseAddress else { return }
+                while bytesRead < byteCount {
+                    let result = pread(
+                        descriptor,
+                        baseAddress.advanced(by: bytesRead),
+                        byteCount - bytesRead,
+                        position + off_t(bytesRead)
+                    )
+                    if result < 0, errno == EINTR { continue }
+                    guard result > 0 else { throw POSIXObservationError.current }
+                    bytesRead += result
+                }
+            }
+            if let newlineIndex = bytes.lastIndex(of: 0x0A) {
+                retainedLength = position + off_t(newlineIndex + 1)
+                break
+            }
+        }
+
+        guard ftruncate(descriptor, retainedLength) == 0 else {
+            throw POSIXObservationError.current
+        }
+        return true
+    }
+
     public func atomicWrite(_ data: Data, to url: URL, permissions: Int16) throws {
         let temporaryURL = url.deletingLastPathComponent()
             .appending(path: ".\(url.lastPathComponent).\(UUID().uuidString).tmp")
@@ -435,6 +493,11 @@ public final class ObservationStore: @unchecked Sendable {
                     return .ignoredIncognito(frame.eventID)
                 }
 
+                if try fileSystem.truncateIncompleteFinalLine(paths.inbox) {
+                    try fileSystem.syncFile(paths.inbox)
+                    try fileSystem.syncDirectory(paths.root)
+                }
+
                 var acceptedIDs = try readAcceptedEventIDsWithoutLock()
                 if acceptedIDs.contains(frame.eventID) {
                     try fileSystem.syncFile(paths.inbox)
@@ -520,6 +583,11 @@ public final class ObservationStore: @unchecked Sendable {
                 clearByTruncating(paths.inbox, category: .inbox, failures: &failures)
                 clearByRemoving(paths.dedup, category: .deduplication, failures: &failures)
                 clearByRemoving(paths.cursor, category: .cursor, failures: &failures)
+                clearByRemoving(
+                    paths.pendingDelivery,
+                    category: .pendingDelivery,
+                    failures: &failures
+                )
                 do {
                     try inMemoryReset()
                 } catch {

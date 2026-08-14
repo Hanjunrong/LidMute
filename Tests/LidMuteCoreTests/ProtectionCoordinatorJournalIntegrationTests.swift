@@ -155,8 +155,60 @@ private final class PausingObservationEventStore: EventStoring, @unchecked Senda
     }
 }
 
+private final class RecoveringHealthEventStore: EventStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextError: EventStoreError?
+    private var events: [LidMuteEvent] = []
+
+    init(firstError: EventStoreError) {
+        nextError = firstError
+    }
+
+    func append(_ event: LidMuteEvent) throws {
+        try lock.withLock {
+            if let error = nextError {
+                nextError = nil
+                throw error
+            }
+            events.append(event)
+        }
+    }
+
+    func load() throws -> [LidMuteEvent] { lock.withLock { events } }
+    func clear() throws { lock.withLock { events.removeAll() } }
+}
+
 @MainActor
 final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
+    func testDetachedObservationLoggingReportsTypedHealthAndRecoversWithoutBlockingSafety() async {
+        let cases: [(EventStoreError, ObservationStorageHealth)] = [
+            (.permissionFailure, .permissionFailure),
+            (.capacityFailure, .capacityFailure),
+            (.corruptRecord(line: 7), .corruptRecord(line: 7)),
+        ]
+
+        for (error, expectedHealth) in cases {
+            let protection = TimelineProtectionApplying(timeline: SharedOperationTimeline())
+            let store = RecoveringHealthEventStore(firstError: error)
+            let coordinator = ProtectionCoordinator(
+                protection: protection,
+                processEvidence: ScriptedAudioController(),
+                store: store
+            )
+            var observedHealth: [ObservationStorageHealth] = []
+            coordinator.onStorageHealth = { observedHealth.append($0) }
+
+            await coordinator.setEnabled(true)
+            await coordinator.flushObservationLogging()
+            XCTAssertEqual(observedHealth, [expectedHealth])
+
+            await coordinator.receivePhysicalLid(closed: true)
+            XCTAssertEqual(coordinator.state, .protecting)
+            await coordinator.flushObservationLogging()
+            XCTAssertEqual(observedHealth, [expectedHealth, .healthy])
+        }
+    }
+
     func testObservationClearDefersOnlyNewestBoundedEventsUntilBoundaryEnds() async throws {
         let protection = PausingRouteProtectionApplying()
         let store = PausingPipelineEventStore()

@@ -229,6 +229,18 @@ public enum SpeakerRecoveryOutcome: Equatable, Sendable {
     case failedSafetyUnknown
 }
 
+public extension SpeakerRecoveryOutcome {
+    var observationDeliveryIsSafeToAcknowledge: Bool {
+        switch self {
+        case .noPendingRecovery, .restored, .failedButVerifiedSilent:
+            true
+        case .waitingForMatchingDevice, .corruptSnapshot,
+             .unsupportedSnapshot, .failedSafetyUnknown:
+            false
+        }
+    }
+}
+
 public enum AppLifecycleState: Equatable, Sendable {
     case recovering
     case shutdownUnresolved

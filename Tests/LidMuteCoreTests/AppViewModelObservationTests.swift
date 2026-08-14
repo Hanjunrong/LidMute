@@ -38,26 +38,61 @@ private final class CountingEventStore: EventStoring, @unchecked Sendable {
     }
 }
 
+private final class RecoveringAppEventStore: EventStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var nextError: EventStoreError? = .permissionFailure
+    private var events: [LidMuteEvent] = []
+
+    func append(_ event: LidMuteEvent) throws {
+        try lock.withLock {
+            if let error = nextError {
+                nextError = nil
+                throw error
+            }
+            events.append(event)
+        }
+    }
+
+    func load() throws -> [LidMuteEvent] { lock.withLock { events } }
+    func recent(limit: Int) throws -> [LidMuteEvent] {
+        lock.withLock { Array(events.suffix(limit)) }
+    }
+    func clear() throws { lock.withLock { events.removeAll() } }
+}
+
 private final class CountingInboxConsumer: ChromeInboxConsuming, @unchecked Sendable {
     private let lock = NSLock()
     private var nextRecords: [ChromeInboxRecord]
     private var _consumeCount = 0
     private var _resetCount = 0
+    private var _acknowledgedDeliveryIDs: [UUID] = []
+    private let deliveryID: UUID?
 
-    init(records: [ChromeInboxRecord] = []) {
+    init(records: [ChromeInboxRecord] = [], deliveryID: UUID? = nil) {
         nextRecords = records
+        self.deliveryID = deliveryID ?? (records.isEmpty ? nil : UUID())
     }
 
     var consumeCount: Int { lock.withLock { _consumeCount } }
     var resetCount: Int { lock.withLock { _resetCount } }
+    var acknowledgedDeliveryIDs: [UUID] { lock.withLock { _acknowledgedDeliveryIDs } }
 
     func consumeAvailable() throws -> ChromeConsumeBatch {
         lock.withLock {
             _consumeCount += 1
             let records = nextRecords
             nextRecords = []
-            return ChromeConsumeBatch(records: records, committedOffset: 0, health: .healthy)
+            return ChromeConsumeBatch(
+                records: records,
+                deliveryID: records.isEmpty ? nil : deliveryID,
+                committedOffset: 0,
+                health: .healthy
+            )
         }
+    }
+
+    func acknowledgeDelivery(_ deliveryID: UUID) throws {
+        lock.withLock { _acknowledgedDeliveryIDs.append(deliveryID) }
     }
 
     func resetInMemoryState() {
@@ -85,8 +120,15 @@ private final class PausingInboxConsumer: ChromeInboxConsuming, @unchecked Senda
         while !resumed, condition.wait(until: deadline) {}
         waiting = false
         condition.unlock()
-        return ChromeConsumeBatch(records: [record], committedOffset: 0, health: .healthy)
+        return ChromeConsumeBatch(
+            records: [record],
+            deliveryID: UUID(),
+            committedOffset: 0,
+            health: .healthy
+        )
     }
+
+    func acknowledgeDelivery(_: UUID) throws {}
 
     func resume() {
         condition.withLock {
@@ -276,11 +318,12 @@ private final class PausingChromeEvidenceCoordinator: ObservationPipelineCoordin
     private(set) var firstDeliveryStarted = false
     private var firstDeliveryContinuation: CheckedContinuation<Void, Never>?
 
-    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async {
+    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async -> SpeakerRecoveryOutcome {
         receiveCount += 1
-        guard receiveCount == 1 else { return }
+        guard receiveCount == 1 else { return .noPendingRecovery }
         firstDeliveryStarted = true
         await withCheckedContinuation { firstDeliveryContinuation = $0 }
+        return .noPendingRecovery
     }
 
     func receiveAudioRouteChanged() async {}
@@ -304,6 +347,29 @@ private final class PausingChromeEvidenceCoordinator: ObservationPipelineCoordin
         continuation?.resume()
     }
 
+}
+
+@MainActor
+private final class OutcomeChromeEvidenceCoordinator: ObservationPipelineCoordinating {
+    private let outcome: SpeakerRecoveryOutcome
+    private(set) var receiveCount = 0
+
+    init(outcome: SpeakerRecoveryOutcome) {
+        self.outcome = outcome
+    }
+
+    func receiveChromeEvidence(_: ChromeTabEvidence) async -> SpeakerRecoveryOutcome {
+        receiveCount += 1
+        return outcome
+    }
+
+    func receiveAudioRouteChanged() async {}
+    func receivePhysicalLid(closed _: Bool) async {}
+    func flushObservationLogging() async {}
+    func beginObservationClear() async -> ObservationClearBoundary {
+        ObservationClearBoundary(generation: 0)
+    }
+    func endObservationClear(_: ObservationClearBoundary) {}
 }
 
 @MainActor
@@ -331,6 +397,7 @@ private final class AppViewModelHarness {
         lifecycle state: AppLifecycleState,
         events: [LidMuteEvent] = [],
         records: [ChromeInboxRecord] = [],
+        deliveryID: UUID? = nil,
         clearFailures: [ObservationClearCategory] = [],
         inboxConsumer: (any ChromeInboxConsuming)? = nil,
         observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil
@@ -344,7 +411,7 @@ private final class AppViewModelHarness {
             .write(to: root.appending(path: "chrome-origin.txt"))
 
         store = CountingEventStore(events: events)
-        consumer = CountingInboxConsumer(records: records)
+        consumer = CountingInboxConsumer(records: records, deliveryID: deliveryID)
         clearer = RecordingObservationClearer(failures: clearFailures)
         lifecycle = MutableLifecycleState(state)
         model = AppViewModel(
@@ -540,6 +607,74 @@ func cursorRetryBatchRecordIsDeliveredToLiveAppPresentation() async throws {
 
     #expect(harness.model.events.first?.observationEventID == record.eventID)
     #expect(harness.model.events.first?.chromeTab?.url == record.evidence.url)
+}
+
+@MainActor
+@Test
+func successfulChromeSafetyAcknowledgesDurablePendingDelivery() async throws {
+    let record = appRecord()
+    let deliveryID = UUID()
+    let coordinator = OutcomeChromeEvidenceCoordinator(outcome: .noPendingRecovery)
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        records: [record],
+        deliveryID: deliveryID,
+        observationPipelineCoordinator: coordinator
+    )
+
+    await harness.model.pollChromeInbox()
+    for _ in 0..<100 where harness.consumer.acknowledgedDeliveryIDs.isEmpty {
+        await Task.yield()
+    }
+
+    #expect(coordinator.receiveCount == 1)
+    #expect(harness.consumer.acknowledgedDeliveryIDs == [deliveryID])
+}
+
+@MainActor
+@Test
+func unsafeChromeOutcomeLeavesPendingDeliveryForRetry() async throws {
+    let record = appRecord()
+    let deliveryID = UUID()
+    let coordinator = OutcomeChromeEvidenceCoordinator(outcome: .failedSafetyUnknown)
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        records: [record],
+        deliveryID: deliveryID,
+        observationPipelineCoordinator: coordinator
+    )
+
+    await harness.model.pollChromeInbox()
+    for _ in 0..<100 where coordinator.receiveCount == 0 { await Task.yield() }
+    for _ in 0..<20 { await Task.yield() }
+
+    #expect(coordinator.receiveCount == 1)
+    #expect(harness.consumer.acknowledgedDeliveryIDs.isEmpty)
+}
+
+@MainActor
+@Test
+func replayedPendingDeliveryDoesNotDuplicatePersistedChromeTimelinePresentation() async throws {
+    let record = appRecord()
+    let persisted = LidMuteEvent(
+        timestamp: record.acceptedAt,
+        kind: .chromeTabAudible,
+        detail: "persisted",
+        observationEventID: record.eventID,
+        chromeTab: record.evidence,
+        correlation: .browserObservedOnly
+    )
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        events: [persisted],
+        records: [record],
+        deliveryID: UUID(),
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(outcome: .noPendingRecovery)
+    )
+
+    await harness.model.pollChromeInbox()
+
+    #expect(harness.model.events.filter { $0.observationEventID == record.eventID }.count == 1)
 }
 
 @MainActor
@@ -792,4 +927,94 @@ func partialClearFailureIsPresentedExplicitly() async throws {
     await harness.model.clearObservationData()
 
     #expect(harness.model.storageStatusText == "部分数据未清空：inbox、cursor")
+}
+
+@MainActor
+@Test
+func eventsClearFailureKeepsTimelineVisibleAndConsistentAfterRestart() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-events-clear-failure-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+    let persisted = [appEvent(1), appEvent(2)]
+    let store = CountingEventStore(events: persisted)
+    let consumer = CountingInboxConsumer()
+    let clearer = RecordingObservationClearer(failures: [.events])
+    let lifecycle = MutableLifecycleState(.ready)
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: store,
+        inboxConsumer: consumer,
+        observationStore: clearer,
+        lifecycle: lifecycle,
+        chromeManifestURL: manifestURL,
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(outcome: .noPendingRecovery)
+    )
+    let timelineBeforeClear = model.events
+
+    await model.clearObservationData()
+
+    #expect(model.events == timelineBeforeClear)
+    #expect(model.chromeBridgeStatus == "等待 Chrome 扩展连接")
+    #expect(model.currentAudioSources.allSatisfy { $0.chromeTab == nil })
+    #expect(consumer.resetCount == 1)
+    #expect(model.storageStatusText == "部分数据未清空：events")
+    model.stopAll()
+
+    let restarted = AppViewModel(
+        applicationSupport: root,
+        eventStore: store,
+        inboxConsumer: CountingInboxConsumer(),
+        observationStore: clearer,
+        lifecycle: MutableLifecycleState(.recovering),
+        chromeManifestURL: manifestURL
+    )
+    #expect(restarted.events == Array(persisted.reversed()))
+}
+
+@MainActor
+@Test
+func coordinatorStorageHealthUpdatesAppAndClearsOnlyAfterPersistenceRecovers() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-coordinator-health-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: RecoveringAppEventStore(),
+        inboxConsumer: CountingInboxConsumer(),
+        observationStore: RecordingObservationClearer(),
+        lifecycle: MutableLifecycleState(.ready),
+        chromeManifestURL: manifestURL
+    )
+    model.receiveAudioRouteChanged()
+    for _ in 0..<100 where model.lifecycleState != .ready { await Task.yield() }
+
+    model.setEnabled(true)
+    for _ in 0..<200 where model.storageStatusText.isEmpty { await Task.yield() }
+    #expect(model.storageStatusText == "观察存储权限不足")
+
+    model.setEnabled(false)
+    for _ in 0..<200 where !model.storageStatusText.isEmpty { await Task.yield() }
+    #expect(model.storageStatusText.isEmpty)
+    model.stopAll()
+}
+
+@MainActor
+@Test
+func coordinatorHealthyRecoveryDoesNotHideAnUnrelatedPartialClearStatus() async throws {
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        clearFailures: [.events]
+    )
+
+    await harness.model.clearObservationData()
+    harness.model.receiveCoordinatorStorageHealth(.healthy)
+
+    #expect(harness.model.storageStatusText == "部分数据未清空：events")
+    harness.model.stopAll()
 }

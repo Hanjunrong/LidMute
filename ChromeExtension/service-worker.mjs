@@ -1,12 +1,15 @@
 const HOST_NAME = 'com.lidmute.nativehost';
 const OUTBOX_LIMIT = 256;
+const INITIAL_RETRY_DELAY_MILLISECONDS = 1_000;
+const MAXIMUM_RETRY_DELAY_MILLISECONDS = 60_000;
 const TERMINAL_DISPOSITIONS = new Set([
   'accepted', 'duplicate', 'ignored_incognito', 'rejected_permanent'
 ]);
+export const RETRY_ALARM_NAME = 'lidmute-native-retry';
+export const RETRY_STATE_KEY = 'nativeRetry';
 let nativePort;
-var reconnectTimer;
-let retryDelayMilliseconds = 1_000;
 let outboxController;
+let retryScheduler;
 
 export function toAudibleFrame(tab, sessionId, seq) {
   return {
@@ -38,6 +41,143 @@ export function toAudibleFrame(tab, sessionId, seq) {
 
 export function replayOutbox(events, post) {
   for (const event of events) post(event);
+}
+
+function chromeRuntimeError() {
+  if (typeof chrome === 'undefined') return undefined;
+  return chrome.runtime?.lastError;
+}
+
+function getAlarm(alarms, name) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = (value) => {
+      if (settled) return;
+      settled = true;
+      const error = chromeRuntimeError();
+      if (error) reject(new Error(error.message));
+      else resolve(value);
+    };
+    try {
+      const result = alarms.get(name, complete);
+      if (result?.then) result.then(complete, reject);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function clearAlarm(alarms, name) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const complete = (value) => {
+      if (settled) return;
+      settled = true;
+      const error = chromeRuntimeError();
+      if (error) reject(new Error(error.message));
+      else resolve(value);
+    };
+    try {
+      const result = alarms.clear(name, complete);
+      if (result?.then) result.then(complete, reject);
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
+  let tail = Promise.resolve();
+  const serial = (operation) => {
+    const result = tail.then(operation, operation);
+    tail = result.catch(() => {});
+    return result;
+  };
+
+  async function state() {
+    const stored = await storage.get([RETRY_STATE_KEY]);
+    return stored[RETRY_STATE_KEY] ?? {};
+  }
+
+  function normalizedDelay(value) {
+    if (!Number.isFinite(value) || value < INITIAL_RETRY_DELAY_MILLISECONDS) {
+      return INITIAL_RETRY_DELAY_MILLISECONDS;
+    }
+    return Math.min(value, MAXIMUM_RETRY_DELAY_MILLISECONDS);
+  }
+
+  async function createAlarm(deadlineMilliseconds) {
+    await Promise.resolve(alarms.create(RETRY_ALARM_NAME, { when: deadlineMilliseconds }));
+  }
+
+  async function ensureAlarm(deadlineMilliseconds) {
+    const existing = await getAlarm(alarms, RETRY_ALARM_NAME);
+    if (!existing) await createAlarm(deadlineMilliseconds);
+  }
+
+  async function clearDeadline(stateBeforeWake) {
+    const nextDelayMilliseconds = normalizedDelay(stateBeforeWake.nextDelayMilliseconds);
+    await storage.set({ [RETRY_STATE_KEY]: { nextDelayMilliseconds } });
+    await clearAlarm(alarms, RETRY_ALARM_NAME);
+  }
+
+  return {
+    schedule() {
+      return serial(async () => {
+        const current = await state();
+        if (Number.isFinite(current.deadlineMilliseconds)) {
+          await ensureAlarm(current.deadlineMilliseconds);
+          return;
+        }
+
+        const delayMilliseconds = normalizedDelay(current.nextDelayMilliseconds);
+        const deadlineMilliseconds = now() + delayMilliseconds;
+        const nextDelayMilliseconds = Math.min(
+          delayMilliseconds * 2,
+          MAXIMUM_RETRY_DELAY_MILLISECONDS
+        );
+        await storage.set({
+          [RETRY_STATE_KEY]: { deadlineMilliseconds, nextDelayMilliseconds }
+        });
+        await createAlarm(deadlineMilliseconds);
+      });
+    },
+    restore() {
+      const prepared = serial(async () => {
+        const current = await state();
+        if (!Number.isFinite(current.deadlineMilliseconds)) {
+          await clearAlarm(alarms, RETRY_ALARM_NAME);
+          return false;
+        }
+        if (current.deadlineMilliseconds <= now()) {
+          await clearDeadline(current);
+          return true;
+        }
+        await ensureAlarm(current.deadlineMilliseconds);
+        return false;
+      });
+      return prepared.then((shouldRetry) => shouldRetry ? retry() : undefined);
+    },
+    fire(alarm) {
+      if (alarm?.name !== RETRY_ALARM_NAME) return Promise.resolve();
+      const prepared = serial(async () => {
+        const current = await state();
+        if (!Number.isFinite(current.deadlineMilliseconds)) {
+          await clearAlarm(alarms, RETRY_ALARM_NAME);
+          return false;
+        }
+        await clearDeadline(current);
+        return true;
+      });
+      return prepared.then((shouldRetry) => shouldRetry ? retry() : undefined);
+    },
+    succeed() {
+      return serial(async () => {
+        await storage.remove(RETRY_STATE_KEY);
+        await clearAlarm(alarms, RETRY_ALARM_NAME);
+      });
+    }
+  };
 }
 
 export function createOutboxController(storage, post, scheduleRetry, resetRetry = () => {}) {
@@ -83,7 +223,7 @@ export function createOutboxController(storage, post, scheduleRetry, resetRetry 
       return serial(async () => {
         if (ack?.type !== 'ack' || !ack.eventId) return;
         if (ack.disposition === 'retryable_failure') {
-          scheduleRetry();
+          await scheduleRetry();
           return;
         }
         if (!TERMINAL_DISPOSITIONS.has(ack.disposition)) return;
@@ -92,7 +232,7 @@ export function createOutboxController(storage, post, scheduleRetry, resetRetry 
         await storage.set({
           outbox: (current.outbox ?? []).filter((event) => event.eventId !== ack.eventId)
         });
-        resetRetry();
+        await resetRetry();
       });
     },
     flush() {
@@ -101,26 +241,30 @@ export function createOutboxController(storage, post, scheduleRetry, resetRetry 
         try {
           replayOutbox(current.outbox ?? [], post);
         } catch {
-          scheduleRetry();
+          await scheduleRetry();
         }
       });
     }
   };
 }
 
-function scheduleRetry() {
-  if (reconnectTimer) return;
+function retries() {
+  if (!retryScheduler) {
+    retryScheduler = createRetryScheduler(
+      chrome.storage.local,
+      chrome.alarms,
+      flushOutbox
+    );
+  }
+  return retryScheduler;
+}
 
-  const delay = retryDelayMilliseconds;
-  retryDelayMilliseconds = Math.min(delay * 2, 60_000);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = undefined;
-    void flushOutbox();
-  }, delay);
+function scheduleRetry() {
+  return retries().schedule();
 }
 
 function resetRetryDelay() {
-  retryDelayMilliseconds = 1_000;
+  return retries().succeed();
 }
 
 function controller() {
@@ -164,7 +308,10 @@ if (typeof chrome !== 'undefined') {
   chrome.tabs.onUpdated.addListener((_id, changeInfo, tab) => {
     if (changeInfo.audible === true) void sendAudibleTab(tab);
   });
+  chrome.alarms.onAlarm.addListener((alarm) => void retries().fire(alarm));
+  void retries().restore();
   chrome.runtime.onStartup.addListener(async () => {
+    await retries().restore();
     await flushOutbox();
     for (const tab of await chrome.tabs.query({ audible: true })) void sendAudibleTab(tab);
   });

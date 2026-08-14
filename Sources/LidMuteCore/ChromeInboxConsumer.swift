@@ -17,15 +17,18 @@ public struct ChromeConsumeCursor: Codable, Equatable, Sendable {
 
 public struct ChromeConsumeBatch: Sendable {
     public let records: [ChromeInboxRecord]
+    public let deliveryID: UUID?
     public let committedOffset: UInt64
     public let health: ObservationStorageHealth
 
     public init(
         records: [ChromeInboxRecord],
+        deliveryID: UUID? = nil,
         committedOffset: UInt64,
         health: ObservationStorageHealth
     ) {
         self.records = records
+        self.deliveryID = deliveryID
         self.committedOffset = committedOffset
         self.health = health
     }
@@ -34,6 +37,7 @@ public struct ChromeConsumeBatch: Sendable {
 public enum ChromeConsumeError: Error, Equatable, Sendable {
     case corruptRecord(line: Int)
     case corruptCursor
+    case corruptPendingDelivery
     case permissionFailure
     case capacityFailure
     case cursorCommitFailure
@@ -42,11 +46,14 @@ public enum ChromeConsumeError: Error, Equatable, Sendable {
 
 public protocol ChromeInboxConsuming: AnyObject, Sendable {
     func consumeAvailable() throws -> ChromeConsumeBatch
+    func acknowledgeDelivery(_ deliveryID: UUID) throws
     func resetInMemoryState()
 }
 
 public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendable {
-    public private(set) var health: ObservationStorageHealth = .healthy
+    public var health: ObservationStorageHealth {
+        healthLock.withLock { storedHealth }
+    }
 
     private static let maximumRecordBytes = 262_144
 
@@ -54,6 +61,8 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
     private let observationStore: ObservationStore
     private let eventStore: BoundedJSONLineEventStore
     private let fileSystem: any ObservationFileSystem
+    private let healthLock = NSLock()
+    private var storedHealth: ObservationStorageHealth = .healthy
 
     public init(
         paths: ObservationPaths,
@@ -71,6 +80,21 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
         do {
             let batch = try observationStore.withExclusiveLock {
                 let generation = try observationStore.currentGeneration()
+                if let pending = try readPendingDelivery() {
+                    guard pending.generation <= generation else {
+                        throw ChromeConsumeError.corruptPendingDelivery
+                    }
+                    if pending.generation == generation {
+                        return ChromeConsumeBatch(
+                            records: pending.records,
+                            deliveryID: pending.deliveryID,
+                            committedOffset: pending.cursor.offset,
+                            health: .healthy
+                        )
+                    }
+                    try removePendingDelivery()
+                }
+
                 let inbox = try readInboxSnapshot()
                 let storedCursor = try readCursor()
                 let normalization = try normalizedCursor(
@@ -126,33 +150,83 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
                     offset: committedOffset,
                     remainder: split.remainder
                 )
+                let deliveryID: UUID?
+                if deliveredRecords.isEmpty {
+                    deliveryID = nil
+                } else {
+                    let identifier = UUID()
+                    try persistPendingDelivery(
+                        ChromePendingDelivery(
+                            deliveryID: identifier,
+                            generation: generation,
+                            records: deliveredRecords,
+                            cursor: committedCursor
+                        )
+                    )
+                    deliveryID = identifier
+                }
                 if storedCursor != committedCursor {
                     try persistCursor(committedCursor)
                 }
 
                 return ChromeConsumeBatch(
                     records: deliveredRecords,
+                    deliveryID: deliveryID,
                     committedOffset: committedOffset,
                     health: .healthy
                 )
             }
-            health = .healthy
+            setHealth(.healthy)
             return batch
         } catch let error as ChromeConsumeError {
-            health = error.health
+            setHealth(error.health)
             throw error
         } catch let error as EventStoreError {
-            health = error.storageHealth
+            setHealth(error.storageHealth)
             throw error
         } catch {
             let mapped = ChromeConsumeError(storageError: error)
-            health = mapped.health
+            setHealth(mapped.health)
+            throw mapped
+        }
+    }
+
+    public func acknowledgeDelivery(_ deliveryID: UUID) throws {
+        do {
+            try observationStore.withExclusiveLock {
+                let generation = try observationStore.currentGeneration()
+                guard let pending = try readPendingDelivery() else { return }
+                guard pending.generation <= generation else {
+                    throw ChromeConsumeError.corruptPendingDelivery
+                }
+                guard pending.generation == generation else {
+                    try removePendingDelivery()
+                    return
+                }
+                guard pending.deliveryID == deliveryID else { return }
+
+                if try readCursor() != pending.cursor {
+                    try persistCursor(pending.cursor)
+                }
+                try removePendingDelivery()
+            }
+            setHealth(.healthy)
+        } catch let error as ChromeConsumeError {
+            setHealth(error.health)
+            throw error
+        } catch {
+            let mapped = ChromeConsumeError(storageError: error)
+            setHealth(mapped.health)
             throw mapped
         }
     }
 
     public func resetInMemoryState() {
         // Cursor and partial-line state are durable; this type intentionally keeps no shadow copy.
+    }
+
+    private func setHealth(_ health: ObservationStorageHealth) {
+        healthLock.withLock { storedHealth = health }
     }
 
     private func readCursor() throws -> ChromeConsumeCursor? {
@@ -163,6 +237,25 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
         } catch {
             throw ChromeConsumeError.corruptCursor
         }
+    }
+
+    private func readPendingDelivery() throws -> ChromePendingDelivery? {
+        let data = try fileSystem.read(paths.pendingDelivery)
+        guard !data.isEmpty else { return nil }
+        let pending: ChromePendingDelivery
+        do {
+            pending = try JSONDecoder().decode(ChromePendingDelivery.self, from: data)
+        } catch {
+            throw ChromeConsumeError.corruptPendingDelivery
+        }
+        guard !pending.records.isEmpty,
+              pending.cursor.generation == pending.generation,
+              pending.records.allSatisfy({
+                  $0.generation == pending.generation && !$0.evidence.isIncognito
+              }) else {
+            throw ChromeConsumeError.corruptPendingDelivery
+        }
+        return pending
     }
 
     private func normalizedCursor(
@@ -256,6 +349,22 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
         }
     }
 
+    private func persistPendingDelivery(_ pending: ChromePendingDelivery) throws {
+        try fileSystem.ensurePrivateDirectory(paths.root)
+        try fileSystem.atomicWrite(
+            try JSONEncoder().encode(pending),
+            to: paths.pendingDelivery,
+            permissions: Int16(0o600)
+        )
+        try fileSystem.syncFile(paths.pendingDelivery)
+        try fileSystem.syncDirectory(paths.root)
+    }
+
+    private func removePendingDelivery() throws {
+        try fileSystem.removeIfPresent(paths.pendingDelivery)
+        try fileSystem.syncDirectory(paths.root)
+    }
+
     private func readInboxSnapshot() throws -> InboxSnapshot {
         let descriptor = open(paths.inbox.path, O_RDONLY | O_CLOEXEC)
         guard descriptor >= 0 else {
@@ -279,6 +388,13 @@ private struct CompleteRecordSplit {
     let lines: [Data]
     let completeByteCount: Int
     let remainder: Data
+}
+
+private struct ChromePendingDelivery: Codable, Equatable, Sendable {
+    let deliveryID: UUID
+    let generation: UInt64
+    let records: [ChromeInboxRecord]
+    let cursor: ChromeConsumeCursor
 }
 
 private struct CursorNormalization {
@@ -326,6 +442,7 @@ private extension ChromeConsumeError {
         switch self {
         case let .corruptRecord(line): .corruptRecord(line: line)
         case .corruptCursor: .ioFailure("corrupt cursor")
+        case .corruptPendingDelivery: .ioFailure("corrupt pending delivery")
         case .permissionFailure: .permissionFailure
         case .capacityFailure: .capacityFailure
         case .cursorCommitFailure: .ioFailure("cursor commit failure")

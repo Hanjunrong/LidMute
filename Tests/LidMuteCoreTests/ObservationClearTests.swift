@@ -36,6 +36,7 @@ private final class ControllableClearFileSystem: ObservationFileSystem, @uncheck
     private var resumeCursorWrite = false
     private var _generationReadCount = 0
     var failTruncationFor: Set<URL> = []
+    var failRemovalFor: Set<URL> = []
 
     init(paths: ObservationPaths) {
         self.paths = paths
@@ -115,6 +116,10 @@ private final class ControllableClearFileSystem: ObservationFileSystem, @uncheck
         )
     }
 
+    func truncateIncompleteFinalLine(_ url: URL) throws -> Bool {
+        try base.truncateIncompleteFinalLine(url)
+    }
+
     func coordinatedAppend(_ data: Data, to url: URL) throws {
         try base.coordinatedAppend(data, to: url)
     }
@@ -143,7 +148,10 @@ private final class ControllableClearFileSystem: ObservationFileSystem, @uncheck
         try base.truncate(url)
     }
 
-    func removeIfPresent(_ url: URL) throws { try base.removeIfPresent(url) }
+    func removeIfPresent(_ url: URL) throws {
+        if failRemovalFor.contains(url) { throw ClearTestError.injectedFailure }
+        try base.removeIfPresent(url)
+    }
 }
 
 private final class ClearMemoryState: @unchecked Sendable {
@@ -248,6 +256,7 @@ func clearAdvancesGenerationAndRemovesPersistedAndInMemoryEvidence() throws {
         let frame = fixture.frame()
         #expect(try fixture.observations.accept(frame) == .accepted(frame.eventID))
         _ = try fixture.consumer.consumeAvailable()
+        #expect(!(try fixture.fileSystem.read(fixture.paths.pendingDelivery)).isEmpty)
         fixture.memory.seed(
             event: try #require(fixture.events.recent(limit: 1).first),
             evidence: frame.evidence
@@ -264,8 +273,51 @@ func clearAdvancesGenerationAndRemovesPersistedAndInMemoryEvidence() throws {
         #expect(try fixture.events.recent(limit: 5_000).isEmpty)
         #expect(try fixture.consumer.consumeAvailable().records.isEmpty)
         #expect(try fixture.observations.acceptedEventIDs().isEmpty)
+        #expect((try fixture.fileSystem.read(fixture.paths.pendingDelivery)).isEmpty)
         #expect(fixture.memory.events.isEmpty)
         #expect(fixture.memory.evidence == nil)
+    }
+}
+
+@Test
+func failedPendingRemovalIsReportedAndOldGenerationDeliveryCannotReplay() throws {
+    try withClearFixture { fixture in
+        let frame = fixture.frame()
+        _ = try fixture.observations.accept(frame)
+        let delivery = try fixture.consumer.consumeAvailable()
+        #expect(delivery.records.map(\.eventID) == [frame.eventID])
+
+        fixture.fileSystem.failRemovalFor = [fixture.paths.pendingDelivery]
+        let report = try fixture.observations.clearObservationData(inMemoryReset: {})
+        #expect(report.failures == [.pendingDelivery])
+        #expect(!(try fixture.fileSystem.read(fixture.paths.pendingDelivery)).isEmpty)
+
+        fixture.fileSystem.failRemovalFor = []
+        #expect(try fixture.consumer.consumeAvailable().records.isEmpty)
+        #expect((try fixture.fileSystem.read(fixture.paths.pendingDelivery)).isEmpty)
+    }
+}
+
+@Test
+func oldGenerationAcknowledgementCannotClearNewPendingDelivery() throws {
+    try withClearFixture { fixture in
+        let old = fixture.frame()
+        _ = try fixture.observations.accept(old)
+        let oldDeliveryID = try #require(fixture.consumer.consumeAvailable().deliveryID)
+        _ = try fixture.observations.clearObservationData(inMemoryReset: {})
+
+        let new = fixture.frame()
+        _ = try fixture.observations.accept(new)
+        let newBatch = try fixture.consumer.consumeAvailable()
+        let newDeliveryID = try #require(newBatch.deliveryID)
+
+        try fixture.consumer.acknowledgeDelivery(oldDeliveryID)
+        let replay = try fixture.consumer.consumeAvailable()
+        #expect(replay.deliveryID == newDeliveryID)
+        #expect(replay.records.map(\.eventID) == [new.eventID])
+
+        try fixture.consumer.acknowledgeDelivery(newDeliveryID)
+        #expect(try fixture.consumer.consumeAvailable().records.isEmpty)
     }
 }
 

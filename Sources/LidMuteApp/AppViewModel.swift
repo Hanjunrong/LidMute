@@ -25,7 +25,7 @@ extension ApplicationLifecycleCoordinator: LifecycleStateProviding {}
 
 @MainActor
 protocol ObservationPipelineCoordinating: AnyObject {
-    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async
+    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async -> SpeakerRecoveryOutcome
     func receivePhysicalLid(closed: Bool) async
     func receiveAudioRouteChanged() async
     func flushObservationLogging() async
@@ -95,6 +95,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var routeChangePending = false
     private var isChromeInboxPollInFlight = false
     private var observationEpoch: UInt64 = 0
+    private var storageStatusIsCoordinatorOwned = false
 
     init(
         applicationSupport: URL? = nil,
@@ -167,11 +168,14 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             endMinutes: NightProtectionPreferences.minutes(from: nightConfiguration.endText) ?? 8 * 60
         )
         coordinator.onEvent = { [weak self] event in self?.receiveCoordinatorEvent(event) }
+        coordinator.onStorageHealth = { [weak self] health in
+            self?.receiveCoordinatorStorageHealth(health)
+        }
         do {
             events = Array(try store.recent(limit: 5_000).reversed())
         } catch {
             events = []
-            storageStatusText = Self.storageFailureText(error)
+            setOperationalStorageStatus(Self.storageFailureText(error))
         }
         resolveChromeExtensionPath()
         refresh()
@@ -387,12 +391,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             let report = try await Task.detached(priority: .utility) {
                 try observationStore.clearObservationData(inMemoryReset: {})
             }.value
-            resetObservationPresentation()
-            storageStatusText = report.isComplete
+            applyObservationClearReport(report)
+            setOperationalStorageStatus(report.isComplete
                 ? ""
-                : "部分数据未清空：\(report.failures.map(\.rawValue).joined(separator: "、"))"
+                : "部分数据未清空：\(report.failures.map(\.rawValue).joined(separator: "、"))")
         } catch {
-            storageStatusText = Self.storageFailureText(error)
+            setOperationalStorageStatus(Self.storageFailureText(error))
         }
         observationPipelineCoordinator.endObservationClear(clearBoundary)
     }
@@ -423,24 +427,61 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             for record in batch.records {
                 latestChromeEvidence = record.evidence
                 receiveCoordinatorEvent(Self.timelineEvent(for: record))
-                enqueueProtectionEvent { model in
+            }
+            enqueueProtectionEvent { model in
+                guard !model.isShuttingDown,
+                      !model.isClearingObservationData,
+                      model.observationEpoch == pollEpoch else { return }
+                var deliveryIsSafeToAcknowledge = true
+                for record in batch.records {
                     guard !model.isShuttingDown,
                           !model.isClearingObservationData,
-                          model.observationEpoch == pollEpoch else { return }
-                    await model.observationPipelineCoordinator.receiveChromeEvidence(record.evidence)
-                    model.refresh()
+                          model.observationEpoch == pollEpoch else {
+                        deliveryIsSafeToAcknowledge = false
+                        break
+                    }
+                    let outcome = await model.observationPipelineCoordinator
+                        .receiveChromeEvidence(record.evidence)
+                    deliveryIsSafeToAcknowledge = deliveryIsSafeToAcknowledge &&
+                        outcome.observationDeliveryIsSafeToAcknowledge
                 }
+                if deliveryIsSafeToAcknowledge, let deliveryID = batch.deliveryID {
+                    let consumer = model.inboxConsumer
+                    do {
+                        try await Task.detached(priority: .utility) {
+                            try consumer.acknowledgeDelivery(deliveryID)
+                        }.value
+                    } catch {
+                        model.setOperationalStorageStatus(Self.storageFailureText(error))
+                    }
+                }
+                model.refresh()
             }
             lastChromeEventAt = Date()
             chromeConnectionState = .receivedEvent
             chromeBridgeStatus = "已接收 Chrome 标签页事件"
             rebuildCurrentAudioSources()
         } catch {
-            storageStatusText = Self.storageFailureText(error)
+            setOperationalStorageStatus(Self.storageFailureText(error))
         }
     }
 
+    func receiveCoordinatorStorageHealth(_ health: ObservationStorageHealth) {
+        if health == .healthy {
+            if storageStatusIsCoordinatorOwned {
+                storageStatusText = ""
+                storageStatusIsCoordinatorOwned = false
+            }
+            return
+        }
+        storageStatusText = Self.storageHealthText(health)
+        storageStatusIsCoordinatorOwned = true
+    }
+
     func receiveCoordinatorEvent(_ event: LidMuteEvent) {
+        if let observationEventID = event.observationEventID {
+            events.removeAll { $0.observationEventID == observationEventID }
+        }
         events.insert(event, at: 0)
         if events.count > 5_000 {
             events.removeLast(events.count - 5_000)
@@ -479,17 +520,24 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         )
     }
 
-    private func resetObservationPresentation() {
-        events.removeAll()
-        latestChromeEvidence = nil
-        lastChromeEventAt = nil
-        currentAudioSources = AudioSourcePresentation.current(
-            processes: currentAudioProcesses,
-            chromeTab: nil
-        )
-        inboxConsumer.resetInMemoryState()
-        chromeConnectionState = .waitingForExtension
-        chromeBridgeStatus = "等待 Chrome 扩展连接"
+    private func applyObservationClearReport(_ report: ObservationClearReport) {
+        if !report.failures.contains(.events) {
+            events.removeAll()
+        }
+        if !report.failures.contains(.inbox) {
+            latestChromeEvidence = nil
+            lastChromeEventAt = nil
+            currentAudioSources = AudioSourcePresentation.current(
+                processes: currentAudioProcesses,
+                chromeTab: nil
+            )
+            chromeConnectionState = .waitingForExtension
+            chromeBridgeStatus = "等待 Chrome 扩展连接"
+        }
+        if !report.failures.contains(.cursor),
+           !report.failures.contains(.pendingDelivery) {
+            inboxConsumer.resetInMemoryState()
+        }
     }
 
     private func refreshNightProtection() async {
@@ -764,6 +812,26 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             return "Chrome 观察数据损坏，未静默跳过"
         default:
             return "观察存储失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func setOperationalStorageStatus(_ text: String) {
+        storageStatusText = text
+        storageStatusIsCoordinatorOwned = false
+    }
+
+    private static func storageHealthText(_ health: ObservationStorageHealth) -> String {
+        switch health {
+        case .healthy:
+            return ""
+        case .corruptRecord:
+            return "观察记录损坏，未静默跳过"
+        case .permissionFailure:
+            return "观察存储权限不足"
+        case .capacityFailure:
+            return "观察存储空间不足"
+        case .ioFailure:
+            return "观察存储 I/O 失败"
         }
     }
 

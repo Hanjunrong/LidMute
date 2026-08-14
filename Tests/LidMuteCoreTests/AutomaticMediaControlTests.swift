@@ -8,7 +8,7 @@ final class AutomaticMediaControlTests: XCTestCase {
         XCTAssertNil(Mirror(reflecting: coordinator).children.first { $0.label == "onMediaPauseRequest" })
     }
 
-    func testChromeEvidenceDuringProtectionOnlyRecordsEvidenceAndSilence() {
+    func testChromeEvidenceDuringProtectionLeavesTimelineOwnershipWithConsumerAndReinforcesSilence() {
         let audio = FakeAudioController()
         audio.activeProcesses = [
             .init(
@@ -24,9 +24,11 @@ final class AutomaticMediaControlTests: XCTestCase {
         let coordinator = ProtectionCoordinator(audio: audio, store: store)
         coordinator.setEnabled(true)
         coordinator.receiveLidState(closed: true)
-        coordinator.receiveChromeEvidence(.fixture(audible: true, incognito: false))
-        XCTAssertTrue(store.events.contains { $0.kind == .chromeTabAudible })
+        let evidence = ChromeTabEvidence.fixture(audible: true, incognito: false)
+        coordinator.receiveChromeEvidence(evidence)
+        XCTAssertFalse(store.events.contains { $0.kind == .chromeTabAudible })
         XCTAssertTrue(store.events.contains { $0.kind == .muteEnforced })
+        XCTAssertEqual(coordinator.latestChromeEvidence, evidence)
     }
 
     func testManualMediaDescriptorsRemainAvailable() {

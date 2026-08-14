@@ -34,6 +34,20 @@ final class RecordingObservationFileSystem: ObservationFileSystem, @unchecked Se
         return lines
     }
 
+    func truncateIncompleteFinalLine(_ url: URL) throws -> Bool {
+        let data = files[url] ?? Data()
+        guard !data.isEmpty, data.last != 0x0A else { return false }
+        let retained: Data
+        if let newline = data.lastIndex(of: 0x0A) {
+            retained = Data(data[...newline])
+        } else {
+            retained = Data()
+        }
+        operations.append("truncate-tail:\(url.lastPathComponent):\(retained.count)")
+        files[url] = retained
+        return true
+    }
+
     func coordinatedAppend(_ data: Data, to url: URL) throws {
         operations.append("write:\(url.lastPathComponent)")
         files[url, default: Data()].append(data)
@@ -78,6 +92,10 @@ final class RecordingObservationFileSystem: ObservationFileSystem, @unchecked Se
 
     func seed(_ data: Data, at url: URL) {
         files[url] = data
+    }
+
+    func persistedBytes() -> Data {
+        files.values.reduce(into: Data()) { $0.append($1) }
     }
 }
 
@@ -205,16 +223,60 @@ final class ObservationStoreAcceptanceTests: XCTestCase {
         XCTAssertFalse(fs.operations.contains("write:chrome-inbox.jsonl"))
     }
 
-    func testPartialInboxTailIsExplicitCorruptionWithoutAppend() {
+    func testPartialInboxTailIsTruncatedBeforeReconciliationAndAccept() throws {
         let fs = RecordingObservationFileSystem()
         let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-partial-tail"))
-        fs.seed(Data("{\"partial\":true}".utf8), at: paths.inbox)
+        let existingID = orderedUUID(40)
+        try seedAcceptedState([existingID], fileSystem: fs, paths: paths)
+        try fs.coordinatedAppend(Data("INCOGNITO-RAW-UNCOMMITTED".utf8), to: paths.inbox)
+        let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+        let nextID = orderedUUID(41)
+
+        XCTAssertEqual(try store.accept(frame(eventID: nextID, incognito: false)), .accepted(nextID))
+        XCTAssertEqual(try store.readInboxRecords().map(\.eventID), [existingID, nextID])
+        XCTAssertTrue(fs.operations.contains { $0.hasPrefix("truncate-tail:chrome-inbox.jsonl:") })
+        XCTAssertFalse(try store.readInboxRecords().contains { $0.evidence.isIncognito })
+        XCTAssertFalse(fs.persistedBytes().contains(Data("INCOGNITO-RAW-UNCOMMITTED".utf8)))
+    }
+
+    func testCompleteMalformedInboxLineRemainsExplicitCorruption() {
+        let fs = RecordingObservationFileSystem()
+        let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-complete-corrupt"))
+        fs.seed(Data("not-json\n".utf8), at: paths.inbox)
         let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
 
         XCTAssertThrowsError(try store.accept(normalFrame())) { error in
             XCTAssertEqual(error as? ObservationStoreError, .corruptMetadata("chrome-inbox.jsonl"))
         }
+        XCTAssertFalse(fs.operations.contains { $0.hasPrefix("truncate-tail:") })
         XCTAssertFalse(fs.operations.contains("write:chrome-inbox.jsonl"))
+    }
+
+    func testPOSIXStoreRecoversCrashSuffixWithoutPersistingIncognitoRetry() throws {
+        let fixture = try ObservationStoreFixture()
+        let firstID = orderedUUID(50)
+        let incognitoID = orderedUUID(51)
+        let nextID = orderedUUID(52)
+        XCTAssertEqual(
+            try fixture.store.accept(frame(eventID: firstID, incognito: false)),
+            .accepted(firstID)
+        )
+        try POSIXObservationFileSystem().coordinatedAppend(
+            Data("PRIVATE-INCOGNITO-RAW-SUFFIX".utf8),
+            to: fixture.paths.inbox
+        )
+
+        XCTAssertEqual(
+            try fixture.store.accept(frame(eventID: incognitoID, incognito: true)),
+            .ignoredIncognito(incognitoID)
+        )
+        XCTAssertEqual(
+            try fixture.store.accept(frame(eventID: nextID, incognito: false)),
+            .accepted(nextID)
+        )
+
+        XCTAssertEqual(try fixture.store.readInboxRecords().map(\.eventID), [firstID, nextID])
+        XCTAssertFalse(try Data(contentsOf: fixture.paths.inbox).contains(Data("PRIVATE-INCOGNITO-RAW-SUFFIX".utf8)))
     }
 
     func testOversizedInboxLineIsExplicitCorruptionWithoutAppend() {
