@@ -96,3 +96,32 @@ All commands used XCTest for Swift tests.
 - `git diff --check`: PASS.
 
 Independent review was scheduled by the root orchestrator after the final diff package was produced.
+
+## Review fix round 1: bounded suffix reconciliation
+
+Ruling:
+
+- Review found that a dedup miss full-decoded the unbounded inbox and treated any historical inbox match as a duplicate. Replaying an ID older than the 4,096-entry window then mutated recent metadata without creating a new acceptance, so the metadata no longer represented the latest 4,096 acceptances.
+- An exact all-history UUID membership index was considered and rejected. It would retain dedup IDs beyond the plan's explicit ordered `suffix(4_096)` contract and grow without bound. The Task 7 guarantee remains bounded: an ID outside the recent window is accepted again and becomes the newest acceptance.
+- Crash reconciliation now reads backward in bounded chunks, decodes at most the newest 4,096 complete inbox records, and rebuilds recent metadata from the current generation's actual suffix. No auxiliary membership index or marker is persisted, and incognito observations still return before any inbox, dedup, or tail-read operation.
+
+RED:
+
+- Added seeded-state XCTest regressions for replay beyond the dedup window and restart after an inbox-fsync/dedup-write crash window. The filesystem spy rejected any full inbox read so the test could not pass through the old unbounded path.
+- The two-test focused run completed in 0.23 seconds with 7 assertion failures, including unexpected `retryablePersistenceFailure` results caused by the rejected full inbox reads.
+
+GREEN:
+
+- Replaying the evicted ID now returns `accepted`, appends exactly one inbox record, and rotates the ordered recent suffix to `oldRecent.dropFirst() + replayedID`.
+- A restart after a dedup-write failure rebuilds the current generation's recent suffix from the bounded inbox tail before accepting the next event. Retrying the recovered in-window event remains terminal `duplicate` without a second inbox record.
+- Existing dedup-write recovery, directory-sync redrive, exact 4,096 order, corruption, permissions, generation, and zero-persistence incognito tests remain green.
+
+Review-round verification:
+
+- Focused new regressions: 2 tests, 0 failures.
+- `swift test --filter ObservationStoreAcceptanceTests`: 14 tests, 0 failures.
+- `swift test --filter ChromeNativeMessagingTests`: 15 tests, 0 failures.
+- `swift test`: 114 tests, 0 failures.
+- `zsh Scripts/make-app-bundle.sh`: PASS; produced and signed `dist/LidMute.app`.
+- `zsh Scripts/run-smoke-check.sh`: PASS, including 114 Swift tests, 2 extension tests, visual/manifest/executable/icon checks, and two consecutive packaging runs.
+- `git diff --check`: PASS.

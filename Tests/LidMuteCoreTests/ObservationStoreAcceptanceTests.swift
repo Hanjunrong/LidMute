@@ -8,11 +8,28 @@ final class RecordingObservationFileSystem: ObservationFileSystem, @unchecked Se
     var ensureDirectoryError: Error?
     var failNextDedupWrite = false
     var failNextDirectorySync = false
+    var rejectFullInboxReads = false
     private var files: [URL: Data] = [:]
 
     func read(_ url: URL) throws -> Data {
         operations.append("read:\(url.lastPathComponent)")
+        if rejectFullInboxReads, url.lastPathComponent == "chrome-inbox.jsonl" {
+            throw CocoaError(.fileReadTooLarge)
+        }
         return files[url] ?? Data()
+    }
+
+    func readLastCompleteLines(_ url: URL, maximumCount: Int, maximumLineBytes: Int) throws -> [Data] {
+        operations.append("read-tail:\(url.lastPathComponent):\(maximumCount)")
+        let data = files[url] ?? Data()
+        guard !data.isEmpty else { return [] }
+        guard data.last == 0x0A else { throw CocoaError(.fileReadCorruptFile) }
+        let allLines: [ArraySlice<UInt8>] = [UInt8](data).split(separator: 0x0A)
+        let lines: [Data] = allLines.suffix(maximumCount).map { Data($0) }
+        guard lines.allSatisfy({ $0.count <= maximumLineBytes }) else {
+            throw CocoaError(.fileReadTooLarge)
+        }
+        return lines
     }
 
     func coordinatedAppend(_ data: Data, to url: URL) throws {
@@ -190,7 +207,7 @@ final class ObservationStoreAcceptanceTests: XCTestCase {
         let fs = RecordingObservationFileSystem()
         let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-dedup-order"))
         let existing = (0..<4_096).map(orderedUUID)
-        fs.seed(try JSONEncoder().encode(existing), at: paths.dedup)
+        try seedAcceptedState(existing, fileSystem: fs, paths: paths)
         let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
         let nextID = orderedUUID(4_096)
 
@@ -199,6 +216,49 @@ final class ObservationStoreAcceptanceTests: XCTestCase {
         XCTAssertEqual(retained.count, 4_096)
         XCTAssertEqual(retained.first, existing[1])
         XCTAssertEqual(retained.last, nextID)
+    }
+
+    func testReplayOlderThanDedupWindowIsAcceptedAsTheNewestEventWithoutFullInboxRead() throws {
+        let fs = RecordingObservationFileSystem()
+        let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-old-replay"))
+        let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+        let accepted = (0...4_096).map(orderedUUID)
+        try seedAcceptedState(accepted, fileSystem: fs, paths: paths)
+        let expectedRecent = Array(accepted.suffix(4_096))
+        XCTAssertEqual(try store.acceptedEventIDs(), expectedRecent)
+
+        fs.rejectFullInboxReads = true
+        XCTAssertEqual(try store.accept(frame(eventID: accepted[0], incognito: false)), .accepted(accepted[0]))
+        XCTAssertEqual(try store.acceptedEventIDs(), Array((accepted + [accepted[0]]).suffix(4_096)))
+        XCTAssertEqual(fs.operations.filter { $0 == "write:chrome-inbox.jsonl" }.count, 1)
+    }
+
+    func testRestartRebuildsRecentDedupFromActualInboxSuffixBeforeAcceptingAnotherEvent() throws {
+        let fs = RecordingObservationFileSystem()
+        let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-restart-suffix"))
+        let existing = (0...4_096).map(orderedUUID)
+        try seedAcceptedState(existing, fileSystem: fs, paths: paths)
+        let failedEventID = orderedUUID(4_097)
+        let nextEventID = orderedUUID(4_098)
+        let firstStore = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+
+        fs.failNextDedupWrite = true
+        XCTAssertThrowsError(try firstStore.accept(frame(eventID: failedEventID, incognito: false))) { error in
+            XCTAssertEqual(error as? ObservationStoreError, .retryablePersistenceFailure)
+        }
+
+        fs.rejectFullInboxReads = true
+        let restarted = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+        XCTAssertEqual(try restarted.accept(frame(eventID: nextEventID, incognito: false)), .accepted(nextEventID))
+        XCTAssertEqual(
+            try restarted.acceptedEventIDs(),
+            Array((existing + [failedEventID, nextEventID]).suffix(4_096))
+        )
+        XCTAssertEqual(try restarted.accept(frame(eventID: failedEventID, incognito: false)), .duplicate(failedEventID))
+        XCTAssertEqual(
+            try restarted.acceptedEventIDs(),
+            Array((existing + [failedEventID, nextEventID]).suffix(4_096))
+        )
     }
 
     func testPOSIXFileSystemUsesPrivateDirectoryAndFileModes() throws {
@@ -255,6 +315,26 @@ final class ObservationStoreAcceptanceTests: XCTestCase {
 
     private func orderedUUID(_ value: Int) -> UUID {
         UUID(uuidString: String(format: "00000000-0000-4000-8000-%012llx", value))!
+    }
+
+    private func seedAcceptedState(
+        _ eventIDs: [UUID],
+        fileSystem: RecordingObservationFileSystem,
+        paths: ObservationPaths
+    ) throws {
+        var inbox = Data()
+        for eventID in eventIDs {
+            let record = ChromeInboxRecord(
+                generation: 0,
+                eventID: eventID,
+                acceptedAt: Date(timeIntervalSinceReferenceDate: 0),
+                evidence: frame(eventID: eventID, incognito: false).evidence
+            )
+            inbox.append(try JSONEncoder().encode(record))
+            inbox.append(0x0A)
+        }
+        fileSystem.seed(inbox, at: paths.inbox)
+        fileSystem.seed(try JSONEncoder().encode(Array(eventIDs.suffix(4_096))), at: paths.dedup)
     }
 
     private func index(of operation: String, in fileSystem: RecordingObservationFileSystem) -> Int {

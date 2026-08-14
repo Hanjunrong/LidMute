@@ -27,6 +27,11 @@ public protocol ObservationLocking: Sendable {
 
 public protocol ObservationFileSystem: Sendable {
     func read(_ url: URL) throws -> Data
+    func readLastCompleteLines(
+        _ url: URL,
+        maximumCount: Int,
+        maximumLineBytes: Int
+    ) throws -> [Data]
     func coordinatedAppend(_ data: Data, to url: URL) throws
     func atomicWrite(_ data: Data, to url: URL, permissions: Int16) throws
     func syncFile(_ url: URL) throws
@@ -159,6 +164,97 @@ public struct POSIXObservationFileSystem: ObservationFileSystem, Sendable {
         }
     }
 
+    public func readLastCompleteLines(
+        _ url: URL,
+        maximumCount: Int,
+        maximumLineBytes: Int
+    ) throws -> [Data] {
+        guard maximumCount > 0 else { return [] }
+
+        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return [] }
+            throw POSIXObservationError.current
+        }
+        defer { Darwin.close(descriptor) }
+
+        let endOffset = lseek(descriptor, 0, SEEK_END)
+        guard endOffset >= 0 else { throw POSIXObservationError.current }
+        guard endOffset > 0 else { return [] }
+
+        let chunkSize = 64 * 1_024
+        var position = endOffset
+        var completeLineCount = 0
+        var currentLineBytes = 0
+        var isFirstByteFromEnd = true
+        var reverseChunks: [Data] = []
+
+        while position > 0, completeLineCount < maximumCount {
+            let byteCount = min(chunkSize, Int(position))
+            position -= off_t(byteCount)
+            var bytes = [UInt8](repeating: 0, count: byteCount)
+            var bytesRead = 0
+
+            try bytes.withUnsafeMutableBytes { buffer in
+                guard let baseAddress = buffer.baseAddress else { return }
+                while bytesRead < byteCount {
+                    let result = pread(
+                        descriptor,
+                        baseAddress.advanced(by: bytesRead),
+                        byteCount - bytesRead,
+                        position + off_t(bytesRead)
+                    )
+                    if result < 0, errno == EINTR { continue }
+                    guard result > 0 else { throw POSIXObservationError.current }
+                    bytesRead += result
+                }
+            }
+
+            reverseChunks.append(Data(bytes))
+            for byte in bytes.reversed() {
+                if isFirstByteFromEnd {
+                    guard byte == 0x0A else {
+                        throw CocoaError(.fileReadCorruptFile)
+                    }
+                    isFirstByteFromEnd = false
+                } else if byte == 0x0A {
+                    completeLineCount += 1
+                    currentLineBytes = 0
+                    if completeLineCount == maximumCount { break }
+                } else {
+                    currentLineBytes += 1
+                    guard currentLineBytes <= maximumLineBytes else {
+                        throw CocoaError(.fileReadTooLarge)
+                    }
+                }
+            }
+        }
+
+        var tail = Data()
+        tail.reserveCapacity(reverseChunks.reduce(0) { $0 + $1.count })
+        for chunk in reverseChunks.reversed() {
+            tail.append(chunk)
+        }
+        guard tail.last == 0x0A else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+
+        if position > 0, let firstNewline = tail.firstIndex(of: 0x0A) {
+            tail.removeSubrange(tail.startIndex...firstNewline)
+        }
+
+        var lines = tail.split(separator: 0x0A, omittingEmptySubsequences: false)
+        guard lines.last?.isEmpty == true else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        lines.removeLast()
+        let retained = lines.suffix(maximumCount)
+        guard retained.allSatisfy({ $0.count <= maximumLineBytes }) else {
+            throw CocoaError(.fileReadTooLarge)
+        }
+        return retained.map { Data($0) }
+    }
+
     public func coordinatedAppend(_ data: Data, to url: URL) throws {
         let descriptor = open(url.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, mode_t(0o600))
         guard descriptor >= 0 else { throw POSIXObservationError.current }
@@ -242,6 +338,9 @@ public struct POSIXObservationFileSystem: ObservationFileSystem, Sendable {
 }
 
 public final class ObservationStore: @unchecked Sendable {
+    private static let maximumAcceptedEventIDs = 4_096
+    private static let maximumInboxRecordBytes = 262_144
+
     private let paths: ObservationPaths
     private let fileSystem: any ObservationFileSystem
     private let lock: any ObservationLocking
@@ -266,18 +365,19 @@ public final class ObservationStore: @unchecked Sendable {
 
                 var acceptedIDs = try readAcceptedEventIDsWithoutLock()
                 if acceptedIDs.contains(frame.eventID) {
-                    guard try readInboxRecordsWithoutLock().contains(where: { $0.eventID == frame.eventID }) else {
-                        throw ObservationStoreError.corruptMetadata(paths.dedup.lastPathComponent)
-                    }
                     try fileSystem.syncFile(paths.inbox)
                     try fileSystem.syncFile(paths.dedup)
                     try fileSystem.syncDirectory(paths.root)
                     return .duplicate(frame.eventID)
                 }
 
-                if try readInboxRecordsWithoutLock().contains(where: { $0.eventID == frame.eventID }) {
+                let inboxEventIDs = try readRecentInboxEventIDsWithoutLock(generation: generation)
+                if inboxEventIDs != acceptedIDs {
                     try fileSystem.syncFile(paths.inbox)
-                    try persistAcceptedEventID(frame.eventID, acceptedIDs: &acceptedIDs)
+                    acceptedIDs = inboxEventIDs
+                    try persistAcceptedEventIDs(acceptedIDs)
+                }
+                if acceptedIDs.contains(frame.eventID) {
                     return .duplicate(frame.eventID)
                 }
 
@@ -360,9 +460,37 @@ public final class ObservationStore: @unchecked Sendable {
         }
     }
 
+    private func readRecentInboxEventIDsWithoutLock(generation: UInt64) throws -> [UUID] {
+        let lines = try fileSystem.readLastCompleteLines(
+            paths.inbox,
+            maximumCount: Self.maximumAcceptedEventIDs,
+            maximumLineBytes: Self.maximumInboxRecordBytes
+        )
+        var eventIDs: [UUID] = []
+        for line in lines {
+            let record: ChromeInboxRecord
+            do {
+                record = try JSONDecoder().decode(ChromeInboxRecord.self, from: line)
+            } catch {
+                throw ObservationStoreError.corruptMetadata(paths.inbox.lastPathComponent)
+            }
+            guard record.generation <= generation else {
+                throw ObservationStoreError.corruptMetadata(paths.inbox.lastPathComponent)
+            }
+            if record.generation == generation {
+                eventIDs.append(record.eventID)
+            }
+        }
+        return eventIDs
+    }
+
     private func persistAcceptedEventID(_ eventID: UUID, acceptedIDs: inout [UUID]) throws {
         acceptedIDs.append(eventID)
-        acceptedIDs = Array(acceptedIDs.suffix(4_096))
+        acceptedIDs = Array(acceptedIDs.suffix(Self.maximumAcceptedEventIDs))
+        try persistAcceptedEventIDs(acceptedIDs)
+    }
+
+    private func persistAcceptedEventIDs(_ acceptedIDs: [UUID]) throws {
         try fileSystem.atomicWrite(
             try JSONEncoder().encode(acceptedIDs),
             to: paths.dedup,
