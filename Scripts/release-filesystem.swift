@@ -3,6 +3,11 @@ import Darwin
 
 private let fixedDistFD: Int32 = 9
 
+private var testFailUnlinkAfter: Int? = {
+    guard let raw = getenv("LIDMUTE_TEST_FAIL_UNLINK_AFTER") else { return nil }
+    return Int(String(cString: raw))
+}()
+
 private struct FileSystemError: Error, CustomStringConvertible {
     let description: String
 }
@@ -30,6 +35,14 @@ private func isRegular(_ status: stat) -> Bool {
 
 private func identity(_ status: stat) -> FileIdentity {
     FileIdentity(device: status.st_dev, inode: status.st_ino)
+}
+
+private func statusForFD(_ fd: Int32) throws -> stat {
+    var status = stat()
+    if fstat(fd, &status) != 0 {
+        throw errnoMessage("fstat fd")
+    }
+    return status
 }
 
 private func validateLeaf(_ name: String) throws {
@@ -127,6 +140,19 @@ private func directoryEntryName(_ entry: UnsafeMutablePointer<dirent>) -> String
     }
 }
 
+private func unlinkEntry(parentFD: Int32, name: String, flags: Int32) throws {
+    if let remaining = testFailUnlinkAfter {
+        if remaining == 0 {
+            testFailUnlinkAfter = nil
+            try fail("injected unlinkat failure")
+        }
+        testFailUnlinkAfter = remaining - 1
+    }
+    if unlinkat(parentFD, name, flags) != 0 {
+        throw errnoMessage("unlinkat (name)")
+    }
+}
+
 private func removeEntry(parentFD: Int32, name: String, requireTopDirectory: Bool) throws {
     guard let status = try statusNoFollow(parentFD: parentFD, name: name) else {
         return
@@ -149,11 +175,9 @@ private func removeEntry(parentFD: Int32, name: String, requireTopDirectory: Boo
         if closedir(directory) != 0 {
             throw errnoMessage("closedir \(name)")
         }
-        if unlinkat(parentFD, name, AT_REMOVEDIR) != 0 {
-            throw errnoMessage("unlinkat directory \(name)")
-        }
-    } else if unlinkat(parentFD, name, 0) != 0 {
-        throw errnoMessage("unlinkat file \(name)")
+        try unlinkEntry(parentFD: parentFD, name: name, flags: AT_REMOVEDIR)
+    } else {
+        try unlinkEntry(parentFD: parentFD, name: name, flags: 0)
     }
 }
 
@@ -222,6 +246,23 @@ private func restoreAfterSwap(
     try renameSwap(firstFD: stageFD, first: appName, secondFD: distFD, second: destination)
 }
 
+private func openInstallLock(distFD: Int32) throws -> Int32 {
+    let lockFD = openat(distFD, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    if lockFD < 0 { throw errnoMessage("openat dist install lock") }
+    return lockFD
+}
+
+private func holdLock(distFD: Int32) throws {
+    let lockFD = try openInstallLock(distFD: distFD)
+    defer { close(lockFD) }
+    if flock(lockFD, LOCK_EX) != 0 { throw errnoMessage("flock install lock") }
+    print("LOCKED")
+    fflush(stdout)
+    var byte: UInt8 = 0
+    _ = read(STDIN_FILENO, &byte, 1)
+    _ = flock(lockFD, LOCK_UN)
+}
+
 private func install(
     distFD: Int32,
     stageName: String,
@@ -235,8 +276,7 @@ private func install(
     try validateAppName(destination)
     if let preferredBackup { try validateBackupName(preferredBackup) }
 
-    let lockFD = dup(distFD)
-    if lockFD < 0 { throw errnoMessage("dup dist install lock") }
+    let lockFD = try openInstallLock(distFD: distFD)
     defer { close(lockFD) }
     if flock(lockFD, LOCK_EX) != 0 { throw errnoMessage("flock install lock") }
     defer { flock(lockFD, LOCK_UN) }
@@ -300,7 +340,6 @@ private func install(
         if installedIdentity != sourceIdentity || sourceStatus != nil {
             try fail("installed App postcondition failed")
         }
-        try removeEntry(parentFD: distFD, name: backupName, requireTopDirectory: true)
     } catch {
         if (try? renameSwap(
             firstFD: distFD,
@@ -311,6 +350,36 @@ private func install(
             try? renameExclusive(fromFD: distFD, from: backupName, toFD: stageFD, to: appName)
         }
         throw error
+    }
+
+    // The verified destination is the commit point. If cleanup fails after
+    // this point, keep the old tree isolated and report the failure; never
+    // restore a backup that may already be partially removed.
+    do {
+        try removeEntry(parentFD: distFD, name: backupName, requireTopDirectory: true)
+    } catch {
+        throw FileSystemError(
+            description: "verified destination installed; isolated backup \(backupName) cleanup failed; " +
+                "leave it for explicit cleanup: \(error)"
+        )
+    }
+}
+
+private func verifyHandle(fd: Int32, repoRoot: String) throws {
+    let distStatus = try statusForFD(fd)
+    let repoFD = open(repoRoot, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    if repoFD < 0 { throw errnoMessage("open repository root") }
+    defer { close(repoFD) }
+    let canonicalDistFD = try openDirectory(parentFD: repoFD, name: "dist")
+    defer { close(canonicalDistFD) }
+    let canonicalStatus = try statusForFD(canonicalDistFD)
+    var cwdStatus = stat()
+    if fstatat(AT_FDCWD, ".", &cwdStatus, 0) != 0 {
+        throw errnoMessage("fstat cwd")
+    }
+    guard identity(distStatus) == identity(canonicalStatus),
+          identity(distStatus) == identity(cwdStatus) else {
+        try fail("dist handle is not the canonical repository dist directory")
     }
 }
 
@@ -361,6 +430,14 @@ private func run() throws {
         guard arguments.count == 4 else { try fail("create-stage requires fd and App name") }
         let fd = try parseFD(arguments[2])
         print(try createStage(distFD: fd, appName: arguments[3]))
+    case "hold-lock":
+        guard arguments.count == 3 else { try fail("hold-lock requires fd") }
+        let fd = try parseFD(arguments[2])
+        try holdLock(distFD: fd)
+    case "verify-handle":
+        guard arguments.count == 4 else { try fail("verify-handle requires fd and repo root") }
+        let fd = try parseFD(arguments[2])
+        try verifyHandle(fd: fd, repoRoot: arguments[3])
     case "remove":
         guard arguments.count == 5 else { try fail("remove requires fd, kind, and basename") }
         let fd = try parseFD(arguments[2])

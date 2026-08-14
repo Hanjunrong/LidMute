@@ -4,6 +4,10 @@ set -euo pipefail
 root="${0:A:h:h}"
 source "$root/Scripts/lib/release-packaging.zsh"
 
+cache_root="${TMPDIR:-/tmp}/lidmute-release-packaging-test-cache"
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$cache_root/clang}"
+export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$cache_root/swift}"
+
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/lidmute-package-policy.XXXXXX")"
 fixture="$(cd -P -- "$fixture" && pwd)"
 trap 'rm -rf -- "$fixture"' EXIT
@@ -83,6 +87,48 @@ grep -Fq 'install_staged_bundle "$root" "$staged_app" "$app"' "$root/Scripts/mak
 ! grep -Fq 'codesign --force --deep --sign' "$root/Scripts/make-app-bundle.sh"
 print "PASS release packaging source contract"
 
+exec {forged_fd}<"$fixture/outside"
+(
+  export LIDMUTE_DIST_HANDLE_ACTIVE=1
+  export LIDMUTE_DIST_FD="$forged_fd"
+  export LIDMUTE_DIST_ROOT=.
+  if _release_filesystem "$root" create-stage Forged.app >/dev/null 2>&1; then
+    print -u2 "forged active dist handle unexpectedly succeeded"
+    exit 1
+  fi
+)
+[[ -z "$(find "$fixture/outside" -maxdepth 1 -name '.lidmute-stage.*' -print -quit)" ]]
+exec {forged_fd}<&-
+dist_stages_before="$(find "$root/dist" -maxdepth 1 -name '.lidmute-stage.*' -print | sort)"
+swift "$root/Scripts/release-filesystem.swift" with-dist "$root" /bin/zsh -c '
+  set -euo pipefail
+  repo="$1"
+  fixture_root="$2"
+  exec {external_fd}<"$fixture_root/outside"
+  export LIDMUTE_DIST_FD="$external_fd"
+  cd "$repo/dist"
+  source "$repo/Scripts/lib/release-packaging.zsh"
+  if _release_filesystem "$repo" create-stage ForgedCanonicalCwd.app; then
+    print -u2 "external inherited dist handle unexpectedly succeeded from canonical cwd"
+    exit 1
+  fi
+' zsh "$root" "$fixture"
+[[ -z "$(find "$fixture/outside" -maxdepth 1 -name '.lidmute-stage.*' -print -quit)" ]]
+[[ "$(find "$root/dist" -maxdepth 1 -name '.lidmute-stage.*' -print | sort)" == "$dist_stages_before" ]]
+
+swift "$root/Scripts/release-filesystem.swift" with-dist "$root" /bin/zsh -c '
+  set -euo pipefail
+  repo="$1"
+  cd ..
+  source "$repo/Scripts/lib/release-packaging.zsh"
+  if _release_filesystem "$repo" create-stage ForgedCwd.app; then
+    print -u2 "canonical inherited handle unexpectedly succeeded from repository cwd"
+    exit 1
+  fi
+' zsh "$root"
+[[ "$(find "$root/dist" -maxdepth 1 -name '.lidmute-stage.*' -print | sort)" == "$dist_stages_before" ]]
+print "PASS forged active dist handle is rejected"
+
 missing_identity_app="$root/dist/Task11MissingIdentity-${fixture:t}.app"
 missing_profile_app="$root/dist/Task11MissingProfile-${fixture:t}.app"
 if LIDMUTE_SIGNING_MODE=developer-id LIDMUTE_DEVELOPER_IDENTITY='' \
@@ -125,6 +171,9 @@ grep -Fq 'renameatx_np' "$root/Scripts/release-filesystem.swift"
 grep -Fq 'O_NOFOLLOW' "$root/Scripts/release-filesystem.swift"
 grep -Fq 'unlinkat' "$root/Scripts/release-filesystem.swift"
 grep -Fq 'flock' "$root/Scripts/release-filesystem.swift"
+grep -Fq 'fstatat(AT_FDCWD, "."' "$root/Scripts/release-filesystem.swift"
+grep -Fq 'canonicalStatus' "$root/Scripts/release-filesystem.swift"
+grep -Fq 'isolated backup' "$root/Scripts/release-filesystem.swift"
 ! grep -Fq '.lidmute-install.lock' "$root/Scripts/release-filesystem.swift"
 ! grep -Eq '(^|[[:space:]])(mv|rm)([[:space:]]|$)' "$root/Scripts/lib/release-packaging.zsh"
 print "PASS fixed directory handle release source contract"

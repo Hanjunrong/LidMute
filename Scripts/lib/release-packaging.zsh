@@ -77,6 +77,10 @@ _release_filesystem() {
   cache_root="${TMPDIR:-/tmp}/lidmute-release-filesystem-cache"
   if [[ "${LIDMUTE_DIST_HANDLE_ACTIVE:-0}" == "1" ]]; then
     [[ "${LIDMUTE_DIST_FD:-}" == <-> ]] || return 69
+    [[ "${LIDMUTE_DIST_ROOT:-}" == "." ]] || return 69
+    CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$cache_root/clang}" \
+      SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$cache_root/swift}" \
+      swift "$helper" verify-handle "$LIDMUTE_DIST_FD" "$repo_root" || return $?
     CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$cache_root/clang}" \
       SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-$cache_root/swift}" \
       swift "$helper" "$operation" "$LIDMUTE_DIST_FD" "$@"
