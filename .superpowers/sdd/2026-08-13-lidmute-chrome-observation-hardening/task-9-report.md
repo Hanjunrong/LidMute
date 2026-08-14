@@ -101,3 +101,39 @@ Chrome inbox batches now rewrite the bounded event history at most once, cursor-
 - Concurrency is exercised with deterministic pausing test doubles rather than a real saturated or stalled disk.
 - Cursor retry is injected at cursor persistence rather than by killing a live App process between event and cursor commits.
 - No installed Chrome extension, real Application Support data, or live speaker state was modified. No UI layout changes were made.
+
+## Review fix round 2
+
+### Result
+
+Observation clear now installs a fence behind the coordinator's current transition FIFO and, after that fence completes, awaits the latest observation-logging tail. This prevents a transition suspended in speaker protection from enqueueing its observations after clear has already deleted evidence. App clear fences both protection-event and route-change producers before entering the coordinator pipeline barrier. Route callbacks reject work during clear and recheck the captured observation epoch after lifecycle suspension, so stale callbacks cannot restart Chrome polling or enter the coordinator after the clear boundary.
+
+The injected coordinator seam now represents the whole observation pipeline: Chrome evidence, route changes, and the transition-plus-logging flush. The production lifecycle coordinator still handles route recovery; test lifecycle providers use an explicit no-op route callback.
+
+### RED / GREEN evidence
+
+#### Coordinator transition and logging fence
+
+- RED: `testObservationFlushWaitsForInFlightTransitionAndItsLoggingTail` showed the old `flushObservationLogging()` completing while a route transition was paused in `protection.apply`. It also remained complete when the route resumed and its later `.muteEnforced` append was paused, proving the old flush had captured only the pre-transition logging tail.
+- GREEN: the flush atomically appends a fence behind the current transition tail, awaits the fence, then captures and awaits the latest logging tail. The test keeps the barrier incomplete through both controlled pauses and, after both resume, observes persisted FIFO order `[.protectionEnabled, .lidClosed, .muteEnforced, .muteEnforced]`.
+
+#### App route-producer fence
+
+- RED: the integration test initially could not express the race because `receiveAudioRouteChanged()` was private and the injected seam covered neither route changes nor a full-pipeline flush. App clear also captured `protectionEventTask` but not `routeChangeTask`.
+- GREEN: `clearWaitsForInFlightRouteProducerAndRejectsRouteDuringClear` uses a real `ProtectionCoordinator`, a controllably paused route-change protection apply, and a controllably paused event-store append. Clear does not reach persistent deletion during either pause, a route callback arriving during clear is rejected (`routeChangeCount == 1`), and after resume the persistent events, App events, Chrome sources, and bridge presentation are cleared. Async continuations suspend rather than block `MainActor`, and the test completes without deadlock.
+
+### Review-round verification
+
+- Focused Swift regression filter (`AppViewModelObservationTests|ObservationClearTests|ProtectionCoordinatorJournalIntegrationTests|ProtectionRouteRetryTests|ApplicationLifecycleCoordinatorTests`): 19 XCTest tests and 14 Swift Testing tests passed.
+- Full Swift verification: 117 XCTest tests and 22 Swift Testing tests passed.
+- `node --test ChromeExtension/service-worker.test.mjs`: 7 passed, 0 failed.
+- `bash Scripts/check-visual-principles.sh`: `PASS visual principle source checks`.
+- `Scripts/make-app-bundle.sh`: fresh Swift build, resource assembly, stale-binary check, icon generation, and ad-hoc signing passed.
+- The first smoke invocation set `TMPDIR` to a nonexistent explicit directory and failed before testing with `couldNotFindTmpDir`. After creating `/tmp/lidmute-task9-review2-smoke`, the same smoke command exited successfully and covered 117 XCTest tests, 22 Swift Testing tests, 7 Node tests, visual checks, build, signing, and bundle creation.
+- Required source scan returned zero matches for silent JSON corruption skipping, whole-inbox App reads, per-callback history reloads, or sorted dedup suffixes.
+- `git diff --check`: clean.
+
+### Review-round manual gaps
+
+- The transition and persistence races use deterministic continuations rather than a live stalled speaker driver or saturated disk.
+- No installed Chrome extension, real Application Support data, or live speaker state was modified. No UI layout changes were made.

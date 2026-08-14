@@ -26,6 +26,88 @@ private actor TimelineProtectionApplying: SpeakerProtectionApplying {
     }
 }
 
+private actor PausingRouteProtectionApplying: SpeakerProtectionApplying {
+    private var shouldPauseRoute = false
+    private var routeStarted = false
+    private var routeContinuation: CheckedContinuation<Void, Never>?
+
+    func pauseNextRouteChange() {
+        shouldPauseRoute = true
+        routeStarted = false
+    }
+
+    func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
+        if case .routeChangedWhileProtectionRequired = action, shouldPauseRoute {
+            shouldPauseRoute = false
+            routeStarted = true
+            await withCheckedContinuation { routeContinuation = $0 }
+        }
+        switch action {
+        case .end:
+            return .restored
+        case .begin, .reinforce, .routeChangedWhileProtectionRequired:
+            return .noPendingRecovery
+        }
+    }
+
+    func waitUntilRouteChangeStarts() async {
+        while !routeStarted { await Task.yield() }
+    }
+
+    func resumeRouteChange() {
+        let continuation = routeContinuation
+        routeContinuation = nil
+        continuation?.resume()
+    }
+}
+
+private final class PausingPipelineEventStore: EventStoring, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var events: [LidMuteEvent] = []
+    private var pauseKind: LidMuteEventKind?
+    private var appendPaused = false
+    private var resumeAppend = false
+
+    var isAppendPaused: Bool { condition.withLock { appendPaused } }
+
+    func pauseNextAppend(of kind: LidMuteEventKind) {
+        condition.withLock {
+            pauseKind = kind
+            appendPaused = false
+            resumeAppend = false
+        }
+    }
+
+    func append(_ event: LidMuteEvent) throws {
+        condition.lock()
+        events.append(event)
+        if pauseKind == event.kind {
+            pauseKind = nil
+            appendPaused = true
+            condition.broadcast()
+            let deadline = Date().addingTimeInterval(0.5)
+            while !resumeAppend, condition.wait(until: deadline) {}
+            appendPaused = false
+        }
+        condition.unlock()
+    }
+
+    func load() throws -> [LidMuteEvent] {
+        condition.withLock { events }
+    }
+
+    func clear() throws {
+        condition.withLock { events.removeAll() }
+    }
+
+    func resumePausedAppend() {
+        condition.withLock {
+            resumeAppend = true
+            condition.broadcast()
+        }
+    }
+}
+
 private final class PausingObservationEventStore: EventStoring, @unchecked Sendable {
     private let condition = NSCondition()
     private let timeline: SharedOperationTimeline
@@ -75,6 +157,51 @@ private final class PausingObservationEventStore: EventStoring, @unchecked Senda
 
 @MainActor
 final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
+    func testObservationFlushWaitsForInFlightTransitionAndItsLoggingTail() async throws {
+        let protection = PausingRouteProtectionApplying()
+        let store = PausingPipelineEventStore()
+        let coordinator = ProtectionCoordinator(
+            protection: protection,
+            processEvidence: ScriptedAudioController(),
+            store: store
+        )
+        await coordinator.setEnabled(true)
+        await coordinator.receivePhysicalLid(closed: true)
+        await coordinator.flushObservationLogging()
+
+        store.pauseNextAppend(of: .muteEnforced)
+        await protection.pauseNextRouteChange()
+        let route = Task { @MainActor in await coordinator.receiveAudioRouteChanged() }
+        await protection.waitUntilRouteChangeStarts()
+
+        let barrierStarted = LockedFlag()
+        let barrierFinished = LockedFlag()
+        let barrier = Task { @MainActor in
+            barrierStarted.set()
+            await coordinator.flushObservationLogging()
+            barrierFinished.set()
+        }
+        while !barrierStarted.get() { await Task.yield() }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertFalse(barrierFinished.get())
+
+        await protection.resumeRouteChange()
+        for _ in 0..<100 where !store.isAppendPaused {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(store.isAppendPaused)
+        XCTAssertFalse(barrierFinished.get())
+
+        store.resumePausedAppend()
+        await route.value
+        await barrier.value
+        XCTAssertTrue(barrierFinished.get())
+        XCTAssertEqual(
+            try store.load().map(\.kind),
+            [.protectionEnabled, .lidClosed, .muteEnforced, .muteEnforced]
+        )
+    }
+
     func testObservationStorageCannotDelaySpeakerSafetyTransitions() async throws {
         let timeline = SharedOperationTimeline()
         let protection = TimelineProtectionApplying(timeline: timeline)

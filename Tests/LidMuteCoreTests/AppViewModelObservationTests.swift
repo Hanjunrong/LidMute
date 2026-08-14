@@ -112,8 +112,102 @@ private final class RecordingObservationClearer: ObservationClearing, @unchecked
     }
 }
 
+private actor AppPausingRouteProtectionApplying: SpeakerProtectionApplying {
+    private var shouldPauseRoute = false
+    private var routeStarted = false
+    private var routeContinuation: CheckedContinuation<Void, Never>?
+    private var routeCount = 0
+
+    func pauseNextRouteChange() {
+        shouldPauseRoute = true
+        routeStarted = false
+    }
+
+    func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
+        if case .routeChangedWhileProtectionRequired = action {
+            routeCount += 1
+            if shouldPauseRoute {
+                shouldPauseRoute = false
+                routeStarted = true
+                await withCheckedContinuation { routeContinuation = $0 }
+            }
+        }
+        return action == .end ? .restored : .noPendingRecovery
+    }
+
+    func waitUntilRouteChangeStarts() async {
+        while !routeStarted { await Task.yield() }
+    }
+
+    func resumeRouteChange() {
+        let continuation = routeContinuation
+        routeContinuation = nil
+        continuation?.resume()
+    }
+
+    func routeChangeCount() -> Int { routeCount }
+}
+
+private final class AppPipelineEventStore: EventStoring, ObservationClearing, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var events: [LidMuteEvent] = []
+    private var pauseKind: LidMuteEventKind?
+    private var appendPaused = false
+    private var resumeAppend = false
+    private var clearCount = 0
+
+    var isAppendPaused: Bool { condition.withLock { appendPaused } }
+    var observationClearCount: Int { condition.withLock { clearCount } }
+
+    func pauseNextAppend(of kind: LidMuteEventKind) {
+        condition.withLock {
+            pauseKind = kind
+            appendPaused = false
+            resumeAppend = false
+        }
+    }
+
+    func append(_ event: LidMuteEvent) throws {
+        condition.lock()
+        events.append(event)
+        if pauseKind == event.kind {
+            pauseKind = nil
+            appendPaused = true
+            condition.broadcast()
+            let deadline = Date().addingTimeInterval(0.5)
+            while !resumeAppend, condition.wait(until: deadline) {}
+            appendPaused = false
+        }
+        condition.unlock()
+    }
+
+    func load() throws -> [LidMuteEvent] {
+        condition.withLock { events }
+    }
+
+    func clear() throws {
+        condition.withLock { events.removeAll() }
+    }
+
+    func clearObservationData(inMemoryReset: () throws -> Void) throws -> ObservationClearReport {
+        condition.withLock {
+            clearCount += 1
+            events.removeAll()
+        }
+        try inMemoryReset()
+        return ObservationClearReport(oldGeneration: 0, newGeneration: 1, failures: [])
+    }
+
+    func resumePausedAppend() {
+        condition.withLock {
+            resumeAppend = true
+            condition.broadcast()
+        }
+    }
+}
+
 @MainActor
-private final class PausingChromeEvidenceCoordinator: ChromeEvidenceCoordinating {
+private final class PausingChromeEvidenceCoordinator: ObservationPipelineCoordinating {
     private(set) var receiveCount = 0
     private(set) var flushCount = 0
     private(set) var firstDeliveryStarted = false
@@ -126,6 +220,8 @@ private final class PausingChromeEvidenceCoordinator: ChromeEvidenceCoordinating
         await withCheckedContinuation { firstDeliveryContinuation = $0 }
     }
 
+    func receiveAudioRouteChanged() async {}
+
     func flushObservationLogging() async {
         flushCount += 1
     }
@@ -135,6 +231,7 @@ private final class PausingChromeEvidenceCoordinator: ChromeEvidenceCoordinating
         firstDeliveryContinuation = nil
         continuation?.resume()
     }
+
 }
 
 @MainActor
@@ -144,6 +241,8 @@ private final class MutableLifecycleState: LifecycleStateProviding {
     init(_ state: AppLifecycleState) {
         self.state = state
     }
+
+    func receiveAudioRouteChanged() async {}
 }
 
 @MainActor
@@ -162,7 +261,7 @@ private final class AppViewModelHarness {
         records: [ChromeInboxRecord] = [],
         clearFailures: [ObservationClearCategory] = [],
         inboxConsumer: (any ChromeInboxConsuming)? = nil,
-        chromeEvidenceCoordinator: (any ChromeEvidenceCoordinating)? = nil
+        observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil
     ) throws {
         root = FileManager.default.temporaryDirectory
             .appending(path: "lidmute-app-observation-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -183,7 +282,7 @@ private final class AppViewModelHarness {
             observationStore: clearer,
             lifecycle: lifecycle,
             chromeManifestURL: manifestURL,
-            chromeEvidenceCoordinator: chromeEvidenceCoordinator
+            observationPipelineCoordinator: observationPipelineCoordinator
         )
         model.chromeExtensionId = registeredExtensionID
     }
@@ -333,7 +432,7 @@ func clearInvalidatesQueuedChromeDeliveryAndWaitsForInFlightDelivery() async thr
     let harness = try AppViewModelHarness(
         lifecycle: .ready,
         records: [firstRecord, secondRecord],
-        chromeEvidenceCoordinator: chromeCoordinator
+        observationPipelineCoordinator: chromeCoordinator
     )
     await harness.model.pollChromeInbox()
     for _ in 0..<100 where !chromeCoordinator.firstDeliveryStarted {
@@ -355,6 +454,78 @@ func clearInvalidatesQueuedChromeDeliveryAndWaitsForInFlightDelivery() async thr
     #expect(chromeCoordinator.flushCount == 1)
     #expect(harness.model.events.isEmpty)
     #expect(harness.model.currentAudioSources.allSatisfy { $0.chromeTab == nil })
+}
+
+@MainActor
+@Test
+func clearWaitsForInFlightRouteProducerAndRejectsRouteDuringClear() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appending(path: "lidmute-app-route-clear-\(UUID().uuidString)", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manifestURL = root.appending(path: "com.lidmute.nativehost.json")
+    try Data("{}".utf8).write(to: manifestURL)
+
+    let record = appRecord()
+    let protection = AppPausingRouteProtectionApplying()
+    let store = AppPipelineEventStore()
+    let pipeline = ProtectionCoordinator(
+        protection: protection,
+        processEvidence: ScriptedAudioController(),
+        store: store
+    )
+    await pipeline.setEnabled(true)
+    await pipeline.receivePhysicalLid(closed: true)
+    await pipeline.flushObservationLogging()
+    try store.clear()
+
+    let lifecycle = MutableLifecycleState(.ready)
+    let consumer = CountingInboxConsumer(records: [record])
+    let model = AppViewModel(
+        applicationSupport: root,
+        eventStore: store,
+        inboxConsumer: consumer,
+        observationStore: store,
+        lifecycle: lifecycle,
+        chromeManifestURL: manifestURL,
+        observationPipelineCoordinator: pipeline
+    )
+    pipeline.onEvent = { event in model.receiveCoordinatorEvent(event) }
+    await model.pollChromeInbox()
+    for _ in 0..<100 {
+        if try store.load().contains(where: { $0.kind == .chromeTabAudible }) { break }
+        await Task.yield()
+    }
+    await pipeline.flushObservationLogging()
+    #expect(model.chromeBridgeStatus == "已接收 Chrome 标签页事件")
+
+    store.pauseNextAppend(of: .muteEnforced)
+    await protection.pauseNextRouteChange()
+    model.receiveAudioRouteChanged()
+    await protection.waitUntilRouteChangeStarts()
+
+    let clear = Task { @MainActor in await model.clearObservationData() }
+    for _ in 0..<100 where !model.isClearingObservationData { await Task.yield() }
+    for _ in 0..<20 { await Task.yield() }
+    #expect(store.observationClearCount == 0)
+
+    model.receiveAudioRouteChanged()
+    await protection.resumeRouteChange()
+    for _ in 0..<100 where !store.isAppendPaused {
+        try await Task.sleep(for: .milliseconds(1))
+    }
+    #expect(store.isAppendPaused)
+    #expect(store.observationClearCount == 0)
+
+    store.resumePausedAppend()
+    await clear.value
+
+    #expect(await protection.routeChangeCount() == 1)
+    #expect(store.observationClearCount == 1)
+    #expect(try store.load().isEmpty)
+    #expect(model.events.isEmpty)
+    #expect(model.currentAudioSources.allSatisfy { $0.chromeTab == nil })
+    #expect(model.chromeBridgeStatus == "等待 Chrome 扩展连接")
 }
 
 @MainActor

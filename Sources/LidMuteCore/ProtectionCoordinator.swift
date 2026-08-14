@@ -74,7 +74,18 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     }
 
     public func flushObservationLogging() async {
-        await observationLoggingTask?.value
+        let predecessor = transitionTask
+        transitionSequence += 1
+        let sequence = transitionSequence
+        let fence = Task { @MainActor in
+            if let predecessor { await predecessor.value }
+        }
+        transitionTask = fence
+        await fence.value
+        if transitionSequence == sequence { transitionTask = nil }
+
+        let loggingTail = observationLoggingTask
+        await loggingTail?.value
     }
 
     private func enqueue(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {

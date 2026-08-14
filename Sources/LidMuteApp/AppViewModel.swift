@@ -18,17 +18,19 @@ enum ChromeConnectionState: Equatable {
 @MainActor
 protocol LifecycleStateProviding: AnyObject {
     var state: AppLifecycleState { get }
+    func receiveAudioRouteChanged() async
 }
 
 extension ApplicationLifecycleCoordinator: LifecycleStateProviding {}
 
 @MainActor
-protocol ChromeEvidenceCoordinating: AnyObject {
+protocol ObservationPipelineCoordinating: AnyObject {
     func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async
+    func receiveAudioRouteChanged() async
     func flushObservationLogging() async
 }
 
-extension ProtectionCoordinator: ChromeEvidenceCoordinating {}
+extension ProtectionCoordinator: ObservationPipelineCoordinating {}
 
 @MainActor
 final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationShuttingDown {
@@ -69,7 +71,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private let store: any EventStoring
     private let inboxConsumer: any ChromeInboxConsuming
     private let observationStore: any ObservationClearing
-    private let chromeEvidenceCoordinator: any ChromeEvidenceCoordinating
+    private let observationPipelineCoordinator: any ObservationPipelineCoordinating
     private let applicationSupport: URL
     private let chromeManifestURL: URL
     private var audioTimer: Timer?
@@ -98,7 +100,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         observationStore: (any ObservationClearing)? = nil,
         lifecycle: (any LifecycleStateProviding)? = nil,
         chromeManifestURL: URL? = nil,
-        chromeEvidenceCoordinator: (any ChromeEvidenceCoordinating)? = nil
+        observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil
     ) {
         let support = applicationSupport ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -146,7 +148,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             store: store
         )
         self.coordinator = coordinator
-        self.chromeEvidenceCoordinator = chromeEvidenceCoordinator ?? coordinator
+        self.observationPipelineCoordinator = observationPipelineCoordinator ?? coordinator
         let lifecycleCoordinator = ApplicationLifecycleCoordinator(
             recovery: recoveryRuntime,
             monitors: self
@@ -373,8 +375,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
 
         let queuedProtectionWork = protectionEventTask
+        let queuedRouteWork = routeChangeTask
         await queuedProtectionWork?.value
-        await chromeEvidenceCoordinator.flushObservationLogging()
+        await queuedRouteWork?.value
+        await observationPipelineCoordinator.flushObservationLogging()
 
         do {
             let report = try observationStore.clearObservationData { [self] in
@@ -427,7 +431,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                     guard !model.isShuttingDown,
                           !model.isClearingObservationData,
                           model.observationEpoch == pollEpoch else { return }
-                    await model.chromeEvidenceCoordinator.receiveChromeEvidence(record.evidence)
+                    await model.observationPipelineCoordinator.receiveChromeEvidence(record.evidence)
                     model.refresh()
                 }
             }
@@ -670,12 +674,13 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
     }
 
-    private func receiveAudioRouteChanged() {
-        guard !isShuttingDown else { return }
+    func receiveAudioRouteChanged() {
+        guard !isShuttingDown, !isClearingObservationData else { return }
         if routeChangeTask != nil {
             routeChangePending = true
             return
         }
+        let routeEpoch = observationEpoch
         routeChangeTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
@@ -684,11 +689,13 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             }
             repeat {
                 routeChangePending = false
-                await lifecycleCoordinator.receiveAudioRouteChanged()
-                lifecycleState = lifecycleCoordinator.state
+                await lifecycleStateProvider.receiveAudioRouteChanged()
+                lifecycleState = lifecycleStateProvider.state
+                guard !isClearingObservationData,
+                      observationEpoch == routeEpoch else { return }
                 startChromeObservationTimerIfReady()
                 if lifecycleState == .ready, !isShuttingDown {
-                    await coordinator.receiveAudioRouteChanged()
+                    await observationPipelineCoordinator.receiveAudioRouteChanged()
                 }
                 refresh()
             } while routeChangePending && !isShuttingDown
@@ -698,6 +705,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private func enqueueProtectionEvent(
         _ operation: @escaping @MainActor (AppViewModel) async -> Void
     ) {
+        guard !isClearingObservationData else { return }
         let predecessor = protectionEventTask
         let task = Task { @MainActor [weak self] in
             await predecessor?.value
