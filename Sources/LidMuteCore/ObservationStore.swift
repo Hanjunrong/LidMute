@@ -461,11 +461,18 @@ public final class ObservationStore: @unchecked Sendable {
     }
 
     private func readRecentInboxEventIDsWithoutLock(generation: UInt64) throws -> [UUID] {
-        let lines = try fileSystem.readLastCompleteLines(
-            paths.inbox,
-            maximumCount: Self.maximumAcceptedEventIDs,
-            maximumLineBytes: Self.maximumInboxRecordBytes
-        )
+        let lines: [Data]
+        do {
+            lines = try fileSystem.readLastCompleteLines(
+                paths.inbox,
+                maximumCount: Self.maximumAcceptedEventIDs,
+                maximumLineBytes: Self.maximumInboxRecordBytes
+            )
+        } catch let error as CocoaError where
+            error.code == .fileReadCorruptFile || error.code == .fileReadTooLarge
+        {
+            throw ObservationStoreError.corruptMetadata(paths.inbox.lastPathComponent)
+        }
         var eventIDs: [UUID] = []
         for line in lines {
             let record: ChromeInboxRecord

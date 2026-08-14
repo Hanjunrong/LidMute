@@ -9,6 +9,7 @@ final class RecordingObservationFileSystem: ObservationFileSystem, @unchecked Se
     var failNextDedupWrite = false
     var failNextDirectorySync = false
     var rejectFullInboxReads = false
+    var tailReadError: Error?
     private var files: [URL: Data] = [:]
 
     func read(_ url: URL) throws -> Data {
@@ -21,6 +22,7 @@ final class RecordingObservationFileSystem: ObservationFileSystem, @unchecked Se
 
     func readLastCompleteLines(_ url: URL, maximumCount: Int, maximumLineBytes: Int) throws -> [Data] {
         operations.append("read-tail:\(url.lastPathComponent):\(maximumCount)")
+        if let tailReadError { throw tailReadError }
         let data = files[url] ?? Data()
         guard !data.isEmpty else { return [] }
         guard data.last == 0x0A else { throw CocoaError(.fileReadCorruptFile) }
@@ -199,6 +201,44 @@ final class ObservationStoreAcceptanceTests: XCTestCase {
         fs.seed(Data("not-json".utf8), at: paths.dedup)
         XCTAssertThrowsError(try store.accept(normalFrame())) { error in
             XCTAssertEqual(error as? ObservationStoreError, .corruptMetadata("chrome-dedup.json"))
+        }
+        XCTAssertFalse(fs.operations.contains("write:chrome-inbox.jsonl"))
+    }
+
+    func testPartialInboxTailIsExplicitCorruptionWithoutAppend() {
+        let fs = RecordingObservationFileSystem()
+        let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-partial-tail"))
+        fs.seed(Data("{\"partial\":true}".utf8), at: paths.inbox)
+        let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+
+        XCTAssertThrowsError(try store.accept(normalFrame())) { error in
+            XCTAssertEqual(error as? ObservationStoreError, .corruptMetadata("chrome-inbox.jsonl"))
+        }
+        XCTAssertFalse(fs.operations.contains("write:chrome-inbox.jsonl"))
+    }
+
+    func testOversizedInboxLineIsExplicitCorruptionWithoutAppend() {
+        let fs = RecordingObservationFileSystem()
+        let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-oversized-tail"))
+        var oversizedLine = Data(repeating: 0x61, count: 262_145)
+        oversizedLine.append(0x0A)
+        fs.seed(oversizedLine, at: paths.inbox)
+        let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+
+        XCTAssertThrowsError(try store.accept(normalFrame())) { error in
+            XCTAssertEqual(error as? ObservationStoreError, .corruptMetadata("chrome-inbox.jsonl"))
+        }
+        XCTAssertFalse(fs.operations.contains("write:chrome-inbox.jsonl"))
+    }
+
+    func testInboxTailIOFailureRemainsRetryable() {
+        let fs = RecordingObservationFileSystem()
+        fs.tailReadError = CocoaError(.fileReadNoPermission)
+        let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-tail-io"))
+        let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+
+        XCTAssertThrowsError(try store.accept(normalFrame())) { error in
+            XCTAssertEqual(error as? ObservationStoreError, .retryablePersistenceFailure)
         }
         XCTAssertFalse(fs.operations.contains("write:chrome-inbox.jsonl"))
     }

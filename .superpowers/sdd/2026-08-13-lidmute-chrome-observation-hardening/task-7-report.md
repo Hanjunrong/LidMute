@@ -125,3 +125,26 @@ Review-round verification:
 - `zsh Scripts/make-app-bundle.sh`: PASS; produced and signed `dist/LidMute.app`.
 - `zsh Scripts/run-smoke-check.sh`: PASS, including 114 Swift tests, 2 extension tests, visual/manifest/executable/icon checks, and two consecutive packaging runs.
 - `git diff --check`: PASS.
+
+## Review fix round 2: explicit structural inbox corruption
+
+RED:
+
+- Added acceptance regressions for a missing terminal newline and a complete inbox line larger than the 262,144-byte recovery ceiling. Both cases require `corruptMetadata("chrome-inbox.jsonl")` and prohibit an append.
+- Added a control regression proving a real tail-read permission/I/O failure remains `retryablePersistenceFailure` rather than being mislabeled as structural corruption.
+- The focused three-test run failed only the two structural cases: both returned `retryablePersistenceFailure`; the permission/I/O control already passed.
+
+GREEN:
+
+- The inbox-tail boundary now translates only Cocoa `.fileReadCorruptFile` and `.fileReadTooLarge` into explicit inbox corruption. POSIX errors and other Cocoa read failures continue through the retryable persistence path.
+- The focused three-test run passed with 0 failures.
+- The atomic-write double-close minor remains deferred because this round intentionally added no descriptor-specific error-path test.
+
+Review-round verification:
+
+- `swift test --filter ObservationStoreAcceptanceTests`: 17 tests, 0 failures.
+- `swift test --filter ChromeNativeMessagingTests`: 15 tests, 0 failures.
+- `swift test`: 117 tests, 0 failures.
+- `zsh Scripts/make-app-bundle.sh`: PASS; produced and signed `dist/LidMute.app`.
+- `zsh Scripts/run-smoke-check.sh`: PASS, including 117 Swift tests, 2 extension tests, and two consecutive packaging runs.
+- `git diff --check`: PASS.
