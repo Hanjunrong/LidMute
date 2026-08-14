@@ -16,6 +16,8 @@ test -x "$bin_path/LidMuteNativeHost"
 test -f ChromeExtension/manifest.json
 ! grep -q '"scripting"' ChromeExtension/manifest.json
 ! grep -q '"<all_urls>"' ChromeExtension/manifest.json
+grep -Fq 'heartbeatInterval: 2' Sources/LidMuteNativeHost/main.swift
+grep -Fq 'defer { heartbeatWriter.stopAndRemove() }' Sources/LidMuteNativeHost/main.swift
 LIDMUTE_SCRATCH_PATH="$scratch" zsh Scripts/make-app-bundle.sh
 LIDMUTE_SCRATCH_PATH="$scratch" zsh Scripts/make-app-bundle.sh
 test -f dist/LidMute.app/Contents/Resources/AppIcon.icns

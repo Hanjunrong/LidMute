@@ -74,6 +74,7 @@ public enum NativeHostProtocolError: Error, Equatable, Sendable {
 
 public final class NativeHostSession: @unchecked Sendable {
     private let acceptor: any ChromeFrameAccepting
+    private let onAccepted: @Sendable (UUID) -> Void
     private let decoder: ChromeFrameDecoder
     private let framer: NativeMessageFramer
 
@@ -81,10 +82,12 @@ public final class NativeHostSession: @unchecked Sendable {
 
     public init(
         acceptor: any ChromeFrameAccepting,
+        onAccepted: @escaping @Sendable (UUID) -> Void = { _ in },
         decoder: ChromeFrameDecoder = .init(),
         framer: NativeMessageFramer = .init()
     ) {
         self.acceptor = acceptor
+        self.onAccepted = onAccepted
         self.decoder = decoder
         self.framer = framer
     }
@@ -107,6 +110,7 @@ public final class NativeHostSession: @unchecked Sendable {
         do {
             switch try acceptor.accept(frame) {
             case let .accepted(eventID):
+                onAccepted(eventID)
                 return ChromeAcknowledgement(eventID: eventID, disposition: .accepted)
             case let .duplicate(eventID):
                 return ChromeAcknowledgement(eventID: eventID, disposition: .duplicate)

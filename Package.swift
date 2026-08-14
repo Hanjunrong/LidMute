@@ -27,6 +27,11 @@ let package = Package(
                 .linkedFramework("SwiftUI"),
             ]
         ),
+        .testTarget(
+            name: "LidMuteAppTests",
+            dependencies: ["LidMuteApp", "LidMuteCore"],
+            path: "Tests/LidMuteAppTests"
+        ),
         .executableTarget(name: "LidMuteNativeHost", dependencies: ["LidMuteCore"]),
     ]
 )

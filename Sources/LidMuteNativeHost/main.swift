@@ -18,11 +18,39 @@ do {
         fail("origin_rejected", status: 2)
     }
 
+    let heartbeatURL = appDirectory.appending(path: "chrome-host-heartbeat.json")
+    let heartbeatStore = FileChromeHostHeartbeatStore(url: heartbeatURL)
+    let acceptanceStore = FileChromeHostAcceptanceStore(
+        url: appDirectory.appending(path: "chrome-host-acceptance.json"),
+        heartbeatURL: heartbeatURL
+    )
+    let sessionToken = UUID()
+    let processID = Int32(ProcessInfo.processInfo.processIdentifier)
+    let heartbeatWriter = ChromeHostHeartbeatWriter(
+        store: heartbeatStore,
+        sessionToken: sessionToken,
+        pid: processID,
+        heartbeatInterval: 2,
+        uptime: { ProcessInfo.processInfo.systemUptime }
+    )
+    try heartbeatWriter.start()
+    defer { heartbeatWriter.stopAndRemove() }
+
     try writePrivate(Data("\(ProcessInfo.processInfo.processIdentifier)".utf8), to: pidURL)
 
     let paths = ObservationPaths(root: appDirectory)
     let store = ObservationStore(paths: paths)
-    let session = NativeHostSession(acceptor: store)
+    let session = NativeHostSession(
+        acceptor: store,
+        onAccepted: { _ in
+            try? acceptanceStore.write(.init(
+                version: ChromeHostAcceptance.schemaVersion,
+                sessionToken: sessionToken,
+                pid: processID,
+                uptime: ProcessInfo.processInfo.systemUptime
+            ))
+        }
+    )
 
     while true {
         let chunk = FileHandle.standardInput.availableData

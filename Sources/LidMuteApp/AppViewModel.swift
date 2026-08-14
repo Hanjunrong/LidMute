@@ -21,6 +21,47 @@ enum StorageStatusSeverity: Int, Equatable {
     case error
 }
 
+enum AudioQueryFailure: Error, Equatable {
+    case queryFailed
+}
+
+protocol AudioProcessPolling {
+    func pollAudioProcesses() -> Result<[AudioProcess], AudioQueryFailure>
+}
+
+extension SystemAudioController: AudioProcessPolling {
+    func pollAudioProcesses() -> Result<[AudioProcess], AudioQueryFailure> {
+        do {
+            return .success(try activeOutputProcesses())
+        } catch {
+            return .failure(.queryFailed)
+        }
+    }
+}
+
+enum AppHealthMapper {
+    static func storage(_ value: ObservationStorageHealth) -> LocalStorageHealth {
+        switch value {
+        case .healthy: return .healthy
+        case .corruptRecord: return .partiallyCorrupt
+        case .permissionFailure: return .permissionFailed
+        case .capacityFailure: return .capacityFailed
+        case .ioFailure: return .ioFailed
+        }
+    }
+
+    static func recovery(_ value: SpeakerRecoveryOutcome) -> SpeakerRecoveryHealth {
+        switch value {
+        case .noPendingRecovery, .restored: return .healthy
+        case .waitingForMatchingDevice: return .waitingForMatchingDevice
+        case .corruptSnapshot: return .corruptSnapshot
+        case .unsupportedSnapshot: return .unsupportedSnapshot
+        case .failedButVerifiedSilent: return .failedButVerifiedSilent
+        case .failedSafetyUnknown: return .failedSafetyUnknown
+        }
+    }
+}
+
 private enum OperationalStorageHealth: Equatable {
     case healthy
     case warning(String)
@@ -32,6 +73,13 @@ private enum OperationalStorageSource {
     case consume
     case acknowledgement
     case clear
+}
+
+private enum ChromeDiagnosticState: Equatable {
+    case none
+    case staleHeartbeat
+    case manifestMismatch
+    case degraded
 }
 
 @MainActor
@@ -79,6 +127,14 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published private(set) var storageStatusText = ""
     @Published private(set) var storageStatusSeverity: StorageStatusSeverity = .none
     @Published private(set) var isClearingObservationData = false
+    @Published private(set) var health = AppHealthSnapshot(
+        coreAudio: .healthyNoActiveOutput,
+        lidMonitor: .healthy,
+        chrome: .waitingForConnection,
+        storage: .healthy,
+        recovery: .healthy
+    )
+    @Published private(set) var canRepairChromeManifest = false
 
     var canToggleGuard: Bool { lifecycleState == .ready }
 
@@ -97,6 +153,13 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private let observationPipelineCoordinator: any ObservationPipelineCoordinating
     private let applicationSupport: URL
     private let chromeManifestURL: URL
+    private let heartbeatStore: any ChromeHostHeartbeatPersisting
+    private let acceptanceStore: any ChromeHostAcceptancePersisting
+    private let chromeRegistration: any ChromeHostRegistering
+    private let diagnosticSink: any LidMuteDiagnosticSinking
+    private let audioPoller: any AudioProcessPolling
+    private let uptime: @Sendable () -> TimeInterval
+    private let expectedChromeHostPath: URL
     private var audioTimer: Timer?
     private var inboxTimer: Timer?
     private var nightTimer: Timer?
@@ -104,7 +167,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var displayMonitor: SystemDisplayMonitor?
     private var latestSystemLidClosed: Bool?
     private var latestChromeEvidence: ChromeTabEvidence?
-    private var lastChromeEventAt: Date?
+    private var lastLidMonitorResult: LidMonitorResult = .state(false)
+    private var chromeDiagnosticState: ChromeDiagnosticState = .none
+    private var chromeBridgeIsDegraded = false
     private let mediaController = SystemMediaController()
     private let nightPreferences = NightProtectionPreferences()
     private var effectiveNightSchedule = NightSchedule(startMinutes: 0, endMinutes: 8 * 60)
@@ -120,6 +185,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var consumeHealth: OperationalStorageHealth = .healthy
     private var ackHealth: OperationalStorageHealth = .healthy
     private var clearHealth: OperationalStorageHealth = .healthy
+    private var startupTypedHealth: ObservationStorageHealth = .healthy
+    private var consumeTypedHealth: ObservationStorageHealth = .healthy
+    private var ackTypedHealth: ObservationStorageHealth = .healthy
+    private var clearTypedHealth: ObservationStorageHealth = .healthy
 
     init(
         applicationSupport: URL? = nil,
@@ -128,14 +197,37 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         observationStore: (any ObservationClearing)? = nil,
         lifecycle: (any LifecycleStateProviding)? = nil,
         chromeManifestURL: URL? = nil,
-        observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil
+        observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil,
+        heartbeatStore: (any ChromeHostHeartbeatPersisting)? = nil,
+        acceptanceStore: (any ChromeHostAcceptancePersisting)? = nil,
+        chromeRegistration: (any ChromeHostRegistering)? = nil,
+        diagnosticSink: (any LidMuteDiagnosticSinking)? = nil,
+        audioPoller: (any AudioProcessPolling)? = nil,
+        uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        expectedChromeHostPath: URL? = nil
     ) {
         let support = applicationSupport ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "LidMute", directoryHint: .isDirectory)
         self.applicationSupport = support
-        self.chromeManifestURL = chromeManifestURL ?? FileManager.default.homeDirectoryForCurrentUser
+        let resolvedManifestURL = chromeManifestURL ?? FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.lidmute.nativehost.json")
+        self.chromeManifestURL = resolvedManifestURL
+        let originURL = support.appending(path: "chrome-origin.txt")
+        let heartbeatURL = support.appending(path: "chrome-host-heartbeat.json")
+        self.heartbeatStore = heartbeatStore ?? FileChromeHostHeartbeatStore(url: heartbeatURL)
+        self.acceptanceStore = acceptanceStore ?? FileChromeHostAcceptanceStore(
+            url: support.appending(path: "chrome-host-acceptance.json"),
+            heartbeatURL: heartbeatURL
+        )
+        self.chromeRegistration = chromeRegistration ?? ChromeHostRegistration(
+            manifestURL: resolvedManifestURL,
+            originURL: originURL
+        )
+        self.diagnosticSink = diagnosticSink ?? LoggerDiagnosticSink()
+        self.uptime = uptime
+        self.expectedChromeHostPath = expectedChromeHostPath ?? Bundle.main.bundleURL
+            .appending(path: "Contents/MacOS/LidMuteNativeHost")
 
         let paths = ObservationPaths(root: support)
         let fileSystem = POSIXObservationFileSystem()
@@ -169,6 +261,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         )
         self.audioController = audioController
+        self.audioPoller = audioPoller ?? audioController
         self.recoveryRuntime = recoveryRuntime
         let coordinator = ProtectionCoordinator(
             protection: recoveryRuntime,
@@ -183,6 +276,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         )
         self.lifecycleCoordinator = lifecycleCoordinator
         lifecycleStateProvider = lifecycle ?? lifecycleCoordinator
+        lifecycleState = lifecycleStateProvider.state
         let nightConfiguration = nightPreferences.load()
         nightScheduleEnabled = nightConfiguration.enabled
         nightStartText = nightConfiguration.startText
@@ -199,11 +293,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             events = Array(try store.recent(limit: 5_000).reversed())
         } catch {
             events = []
-            setOperationalStorageStatus(Self.storageFailureText(error), source: .startup)
+            setOperationalStorageFailure(error, source: .startup)
         }
         resolveChromeExtensionPath()
         refresh()
-        checkChromeConnection()
+        refreshHealth()
     }
 
     func start() async {
@@ -220,7 +314,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         try routeMonitor.start()
         lifecycleState = .ready
         if lidMonitor == nil {
-            let monitor = SystemLidMonitor { [weak self] closed in self?.receiveSystemLidState(closed) }
+            let monitor = SystemLidMonitor { [weak self] result in self?.receiveLidMonitorResult(result) }
             monitor.start()
             lidMonitor = monitor
         }
@@ -279,6 +373,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         stopAll()
         await pendingProtectionEvents?.value
         let outcome = await coordinator.endProtectionForShutdown()
+        setRecoveryHealth(AppHealthMapper.recovery(outcome))
         isEnabled = false
         refresh()
         return .recovery(outcome)
@@ -295,6 +390,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         if case let .recovery(outcome) = result {
             lifecycleCoordinator.resume(after: outcome)
             lifecycleState = lifecycleCoordinator.state
+            setRecoveryHealth(AppHealthMapper.recovery(outcome))
         }
         startChromeObservationTimerIfReady()
         refresh()
@@ -324,6 +420,20 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             guard !model.isShuttingDown else { return }
             await model.observationPipelineCoordinator.receivePhysicalLid(closed: closed)
             model.refresh()
+        }
+    }
+
+    func receiveLidMonitorResult(_ result: LidMonitorResult) {
+        lastLidMonitorResult = result
+        switch result {
+        case let .state(closed):
+            receiveSystemLidState(closed)
+        case .unavailable:
+            diagnosticSink.emit(.lidMonitorUnavailable)
+            refreshHealth()
+        case .readFailed:
+            diagnosticSink.emit(.lidMonitorReadFailed)
+            refreshHealth()
         }
     }
 
@@ -425,8 +535,13 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 severity: .warning,
                 source: .clear
             )
+            setOperationalStorageHealth(
+                report.isComplete ? .healthy : .ioFailure("clear_partial"),
+                source: .clear,
+                updatePresentation: false
+            )
         } catch {
-            setOperationalStorageStatus(Self.storageFailureText(error), source: .clear)
+            setOperationalStorageFailure(error, source: .clear)
         }
         observationPipelineCoordinator.endObservationClear(clearBoundary, report: clearReport)
     }
@@ -445,6 +560,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             let batch = try await Task.detached(priority: .utility) {
                 try consumer.consumeAvailable()
             }.value
+            chromeBridgeIsDegraded = false
             setOperationalStorageHealth(batch.health, source: .consume)
             guard lifecycleStateProvider.state == .ready,
                   !isShuttingDown,
@@ -482,12 +598,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                         try await Task.detached(priority: .utility) {
                             try consumer.acknowledgeDelivery(deliveryID)
                         }.value
-                        model.setOperationalStorageStatus("", source: .acknowledgement)
+                        model.setOperationalStorageHealth(.healthy, source: .acknowledgement)
                     } catch {
-                        model.setOperationalStorageStatus(
-                            Self.storageFailureText(error),
-                            source: .acknowledgement
-                        )
+                        model.setOperationalStorageFailure(error, source: .acknowledgement)
                     }
                 }
                 model.refresh()
@@ -497,12 +610,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                   !isShuttingDown,
                   !isClearingObservationData,
                   observationEpoch == pollEpoch else { return }
-            lastChromeEventAt = Date()
             chromeConnectionState = .receivedEvent
             chromeBridgeStatus = "已接收 Chrome 标签页事件"
             rebuildCurrentAudioSources()
         } catch {
-            setOperationalStorageStatus(Self.storageFailureText(error), source: .consume)
+            receiveChromeBridgeDegraded()
+            setOperationalStorageFailure(error, source: .consume)
         }
     }
 
@@ -522,12 +635,24 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         refresh()
     }
 
-    private func pollAudioProcesses() {
+    func pollAudioProcesses() {
         guard lifecycleState == .ready, !isShuttingDown else { return }
-        do {
-            updateAudioProcesses(try audioController.activeOutputProcesses())
-        } catch {
-            statusText = "无法读取音频进程：\(error.localizedDescription)"
+        receiveAudioPollResult(audioPoller.pollAudioProcesses())
+    }
+
+    func receiveAudioPollResult(_ result: Result<[AudioProcess], AudioQueryFailure>) {
+        switch result {
+        case let .success(processes):
+            updateHealth(coreAudio: processes.isEmpty
+                ? .healthyNoActiveOutput
+                : .healthy(activeOutputCount: processes.count))
+            updateAudioProcesses(processes)
+        case .failure:
+            if health.coreAudio != .queryFailed {
+                diagnosticSink.emit(.coreAudioQueryFailed)
+            }
+            updateHealth(coreAudio: .queryFailed)
+            statusText = "无法查询 CoreAudio，请检查系统状态"
         }
     }
 
@@ -559,7 +684,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
         if !report.failures.contains(.inbox) {
             latestChromeEvidence = nil
-            lastChromeEventAt = nil
+            try? acceptanceStore.remove()
             currentAudioSources = AudioSourcePresentation.current(
                 processes: currentAudioProcesses,
                 chromeTab: nil
@@ -628,10 +753,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         chromeExtensionPath = "LidMute.app/Contents/Resources/ChromeExtension"
     }
 
-    private var chromePidURL: URL {
-        applicationSupport.appending(path: "chrome-host.pid")
-    }
-
     private var chromeOriginURL: URL {
         applicationSupport.appending(path: "chrome-origin.txt")
     }
@@ -645,40 +766,124 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     func checkChromeConnection() {
-        let fm = FileManager.default
-        let manifestExists = fm.fileExists(atPath: chromeManifestURL.path)
-
-        if !manifestExists {
+        refreshHealth()
+        switch health.chrome {
+        case .notRegistered:
             chromeConnectionState = .notRegistered
             chromeBridgeStatus = "未注册 Chrome 通信主机"
-            return
-        }
-
-        let isHostAlive: Bool = {
-            guard let pidData = try? Data(contentsOf: chromePidURL),
-                  let pidStr = String(data: pidData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  let pid = Int32(pidStr) else { return false }
-            return kill(pid, 0) == 0
-        }()
-
-        if isHostAlive {
-            let recentlyReceived = lastChromeEventAt.map { Date().timeIntervalSince($0) < 30 } ?? false
-            if recentlyReceived {
-                chromeConnectionState = .receivedEvent
-                chromeBridgeStatus = "最近收到 Chrome 事件"
-            } else {
-                chromeConnectionState = .connected
-                chromeBridgeStatus = "Chrome 已连接"
-            }
-        } else {
+        case .waitingForConnection:
             chromeConnectionState = .waitingForExtension
             chromeBridgeStatus = "等待 Chrome 扩展连接"
+        case .connected:
+            chromeConnectionState = .connected
+            chromeBridgeStatus = "Chrome 已连接"
+        case .recentlyAccepted:
+            chromeConnectionState = .receivedEvent
+            chromeBridgeStatus = "最近收到 Chrome 事件"
+        case .manifestPathMismatch:
+            chromeConnectionState = .notRegistered
+            chromeBridgeStatus = "Chrome 通信路径需要修复"
+        case .degraded:
+            chromeConnectionState = .waitingForExtension
+            chromeBridgeStatus = "Chrome 通信异常"
         }
 
         // Pre-fill extension ID if registered
         if chromeExtensionId.isEmpty, let registeredId = registeredExtensionId {
             chromeExtensionId = registeredId
         }
+    }
+
+    func refreshHealth() {
+        switch lastLidMonitorResult {
+        case .state:
+            updateHealth(lidMonitor: .healthy)
+        case .unavailable:
+            updateHealth(lidMonitor: .unavailable)
+        case .readFailed:
+            updateHealth(lidMonitor: .readFailed)
+        }
+
+        switch lifecycleState {
+        case let .recoveryBlocked(outcome):
+            setRecoveryHealth(AppHealthMapper.recovery(outcome))
+        case .ready where !isShuttingDown:
+            setRecoveryHealth(.healthy)
+        case .ready, .recovering, .shutdownUnresolved:
+            break
+        }
+
+        let nextChromeHealth: ChromeBridgeHealth
+        let nextDiagnosticState: ChromeDiagnosticState
+        switch chromeRegistration.inspect(expectedHostPath: expectedChromeHostPath) {
+        case .notRegistered:
+            canRepairChromeManifest = false
+            nextChromeHealth = .notRegistered
+            nextDiagnosticState = .none
+        case let .pathMismatch(expected, registered):
+            canRepairChromeManifest = true
+            nextChromeHealth = .manifestPathMismatch(expected: expected, registered: registered)
+            nextDiagnosticState = .manifestMismatch
+        case .malformed:
+            canRepairChromeManifest = false
+            nextChromeHealth = .degraded
+            nextDiagnosticState = .degraded
+        case .current:
+            canRepairChromeManifest = false
+            if chromeBridgeIsDegraded {
+                nextChromeHealth = .degraded
+                nextDiagnosticState = .degraded
+            } else {
+                let nowUptime = uptime()
+                switch heartbeatStore.readFreshness(nowUptime: nowUptime, ttl: 6) {
+                case let .fresh(sessionToken, pid):
+                    if acceptanceStore.readFreshness(nowUptime: nowUptime, ttl: 30) ==
+                        .fresh(sessionToken: sessionToken, pid: pid) {
+                        nextChromeHealth = .recentlyAccepted(sessionToken: sessionToken, pid: pid)
+                    } else {
+                        nextChromeHealth = .connected(sessionToken: sessionToken, pid: pid)
+                    }
+                    nextDiagnosticState = .none
+                case .stale:
+                    nextChromeHealth = .waitingForConnection
+                    nextDiagnosticState = .staleHeartbeat
+                case .malformed:
+                    nextChromeHealth = .degraded
+                    nextDiagnosticState = .degraded
+                }
+            }
+        }
+        updateHealth(chrome: nextChromeHealth)
+        if nextDiagnosticState != chromeDiagnosticState {
+            switch nextDiagnosticState {
+            case .none:
+                break
+            case .staleHeartbeat:
+                diagnosticSink.emit(.chromeHeartbeatStale)
+            case .manifestMismatch:
+                diagnosticSink.emit(.chromeManifestPathMismatch)
+            case .degraded:
+                diagnosticSink.emit(.chromeBridgeDegraded)
+            }
+            chromeDiagnosticState = nextDiagnosticState
+        }
+    }
+
+    func receiveChromeBridgeDegraded() {
+        chromeBridgeIsDegraded = true
+        refreshHealth()
+    }
+
+    func repairChromeManifest() {
+        guard canRepairChromeManifest else { return }
+        do {
+            try chromeRegistration.repair(expectedHostPath: expectedChromeHostPath)
+            chromeRegistrationStatus = "Chrome 通信路径已修复"
+            diagnosticSink.emit(.chromeManifestRepaired)
+        } catch {
+            chromeRegistrationStatus = "Chrome 通信路径修复失败"
+        }
+        refreshHealth()
     }
 
     func registerChromeHost(extensionId: String) {
@@ -744,6 +949,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     private func refresh() {
+        defer { refreshHealth() }
         switch lifecycleState {
         case .recovering:
             statusText = "正在恢复内建扬声器安全状态"
@@ -762,6 +968,37 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         case .armed: statusText = "已开启，等待合盖"
         case .protecting: statusText = "正在保护内建扬声器"
         case .unavailable: statusText = "未发现可控制的内建扬声器"
+        }
+    }
+
+    private func updateHealth(
+        coreAudio: CoreAudioHealth? = nil,
+        lidMonitor: LidMonitorHealth? = nil,
+        chrome: ChromeBridgeHealth? = nil,
+        storage: LocalStorageHealth? = nil,
+        recovery: SpeakerRecoveryHealth? = nil
+    ) {
+        health = AppHealthSnapshot(
+            coreAudio: coreAudio ?? health.coreAudio,
+            lidMonitor: lidMonitor ?? health.lidMonitor,
+            chrome: chrome ?? health.chrome,
+            storage: storage ?? health.storage,
+            recovery: recovery ?? health.recovery
+        )
+    }
+
+    private func setRecoveryHealth(_ value: SpeakerRecoveryHealth) {
+        guard health.recovery != value else { return }
+        updateHealth(recovery: value)
+        switch value {
+        case .waitingForMatchingDevice:
+            diagnosticSink.emit(.recoveryWaitingForMatchingDevice)
+        case .failedButVerifiedSilent:
+            diagnosticSink.emit(.recoveryFailedButVerifiedSilent)
+        case .failedSafetyUnknown:
+            diagnosticSink.emit(.recoveryFailedSafetyUnknown)
+        case .healthy, .corruptSnapshot, .unsupportedSnapshot:
+            break
         }
     }
 
@@ -878,9 +1115,39 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     private func setOperationalStorageHealth(
         _ health: ObservationStorageHealth,
-        source: OperationalStorageSource
+        source: OperationalStorageSource,
+        updatePresentation: Bool = true
     ) {
-        setOperationalStorageStatus(Self.storageHealthText(health), source: source)
+        switch source {
+        case .startup:
+            startupTypedHealth = health
+        case .consume:
+            consumeTypedHealth = health
+        case .acknowledgement:
+            ackTypedHealth = health
+        case .clear:
+            clearTypedHealth = health
+        }
+        if updatePresentation {
+            setOperationalStorageStatus(Self.storageHealthText(health), source: source)
+        } else {
+            publishStorageStatusPresentation()
+        }
+    }
+
+    private func setOperationalStorageFailure(_ error: Error, source: OperationalStorageSource) {
+        let typed = Self.storageHealth(for: error)
+        switch source {
+        case .startup:
+            startupTypedHealth = typed
+        case .consume:
+            consumeTypedHealth = typed
+        case .acknowledgement:
+            ackTypedHealth = typed
+        case .clear:
+            clearTypedHealth = typed
+        }
+        setOperationalStorageStatus(Self.storageFailureText(error), source: source)
     }
 
     private func publishStorageStatusPresentation() {
@@ -912,6 +1179,56 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             }
         }.joined(separator: "\n")
         storageStatusSeverity = severity
+
+        let candidates = [coordinatorStorageHealth, startupTypedHealth, consumeTypedHealth, ackTypedHealth, clearTypedHealth]
+            .map(AppHealthMapper.storage)
+        let mapped = candidates.max(by: { Self.storageRank($0) < Self.storageRank($1) }) ?? .healthy
+        if mapped != health.storage {
+            updateHealth(storage: mapped)
+            switch mapped {
+            case .partiallyCorrupt:
+                diagnosticSink.emit(.storagePartiallyCorrupt)
+            case .permissionFailed:
+                diagnosticSink.emit(.storagePermissionFailed)
+            case .capacityFailed:
+                diagnosticSink.emit(.storageCapacityFailed)
+            case .healthy, .ioFailed:
+                break
+            }
+        }
+    }
+
+    private static func storageRank(_ health: LocalStorageHealth) -> Int {
+        switch health {
+        case .healthy: 0
+        case .partiallyCorrupt: 1
+        case .ioFailed: 2
+        case .permissionFailed: 3
+        case .capacityFailed: 4
+        }
+    }
+
+    private static func storageHealth(for error: Error) -> ObservationStorageHealth {
+        switch error {
+        case let error as EventStoreError:
+            switch error {
+            case let .corruptRecord(line): return .corruptRecord(line: line)
+            case .permissionFailure: return .permissionFailure
+            case .capacityFailure: return .capacityFailure
+            case let .ioFailure(reason): return .ioFailure(reason)
+            }
+        case let error as ChromeConsumeError:
+            switch error {
+            case let .corruptRecord(line): return .corruptRecord(line: line)
+            case .corruptCursor, .corruptPendingDelivery: return .corruptRecord(line: 0)
+            case .permissionFailure: return .permissionFailure
+            case .capacityFailure: return .capacityFailure
+            case let .ioFailure(reason): return .ioFailure(reason)
+            case .cursorCommitFailure: return .ioFailure("cursor_commit")
+            }
+        default:
+            return .ioFailure("operation")
+        }
     }
 
     private static func storageHealthText(_ health: ObservationStorageHealth) -> String {

@@ -153,6 +153,12 @@ private struct GuardHero: View {
                     .font(ControlCenterTypography.body)
                     .foregroundStyle(palette.secondaryText)
 
+                if model.health.recovery == .failedSafetyUnknown {
+                    Label("扬声器安全状态未知，正常退出已阻止", systemImage: "exclamationmark.octagon.fill")
+                        .font(ControlCenterTypography.caption)
+                        .foregroundStyle(AmberVisualTheme.danger)
+                }
+
                 HStack(spacing: 8) {
                     MetricPill(
                         title: model.isDisplaySleeping ? "息屏" : "亮屏",
@@ -165,7 +171,9 @@ private struct GuardHero: View {
                         tint: AmberVisualTheme.seaGlass
                     )
                     MetricPill(
-                        title: model.currentAudioProcesses.isEmpty ? "无活动音频" : "\(model.currentAudioProcesses.count) 个音频进程",
+                        title: model.health.coreAudio == .queryFailed
+                            ? "CoreAudio 查询失败"
+                            : (model.currentAudioProcesses.isEmpty ? "无活动音频" : "\(model.currentAudioProcesses.count) 个音频进程"),
                         systemImage: "waveform",
                         tint: AmberVisualTheme.amber
                     )
@@ -395,11 +403,17 @@ private struct NowPlayingCard: View {
                 )
                 Spacer()
                 Circle()
-                    .fill(model.currentAudioProcesses.isEmpty ? Color.secondary.opacity(0.4) : AmberVisualTheme.seaGlass)
+                    .fill(model.health.coreAudio == .queryFailed
+                        ? AmberVisualTheme.danger
+                        : (model.currentAudioProcesses.isEmpty ? Color.secondary.opacity(0.4) : AmberVisualTheme.seaGlass))
                     .frame(width: 8, height: 8)
             }
 
-            if model.currentAudioProcesses.isEmpty {
+            if model.health.coreAudio == .queryFailed {
+                Label("无法查询 CoreAudio，请检查系统状态", systemImage: "exclamationmark.triangle")
+                    .font(ControlCenterTypography.body)
+                    .foregroundStyle(AmberVisualTheme.danger)
+            } else if model.currentAudioProcesses.isEmpty {
                 Label("当前没有活动音频", systemImage: "speaker.slash")
                     .font(ControlCenterTypography.body)
                     .foregroundStyle(palette.secondaryText)
@@ -703,7 +717,31 @@ private struct ChromeGuideView: View {
             }
 
             // Registration area
-            if model.chromeConnectionState != .connected && model.chromeConnectionState != .receivedEvent {
+            if let mismatch = manifestMismatch {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Chrome 通信路径与当前 App 位置不一致", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                        .font(ControlCenterTypography.body)
+                        .foregroundStyle(AmberVisualTheme.amber)
+                    Text("旧路径：\(mismatch.registered)")
+                        .font(ControlCenterTypography.codeCaption)
+                        .lineLimit(2)
+                    Text("新路径：\(mismatch.expected)")
+                        .font(ControlCenterTypography.codeCaption)
+                        .lineLimit(2)
+                    Button {
+                        model.repairChromeManifest()
+                    } label: {
+                        Label("修复 Chrome 通信路径", systemImage: "wrench.and.screwdriver.fill")
+                    }
+                    .buttonStyle(
+                        LiquidGlassButtonStyle(tint: AmberVisualTheme.amber, isEmphasized: true, shape: .capsule)
+                    )
+                }
+                .padding(10)
+                .background(palette.surfaceTertiary, in: RoundedRectangle(cornerRadius: 10))
+
+                Divider().opacity(0.3)
+            } else if model.chromeConnectionState != .connected && model.chromeConnectionState != .receivedEvent {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("扩展 ID")
                         .font(ControlCenterTypography.caption)
@@ -770,6 +808,13 @@ private struct ChromeGuideView: View {
         }
         .padding(20)
         .frame(width: 420)
+    }
+
+    private var manifestMismatch: (expected: String, registered: String)? {
+        guard case let .manifestPathMismatch(expected, registered) = model.health.chrome else {
+            return nil
+        }
+        return (expected, registered)
     }
 
     private var statusDotColor: Color {

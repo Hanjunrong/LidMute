@@ -2,13 +2,19 @@ import Foundation
 import IOKit
 import IOKit.pwr_mgt
 
+enum LidMonitorResult: Equatable {
+    case state(Bool)
+    case unavailable
+    case readFailed
+}
+
 @MainActor
 final class SystemLidMonitor {
     private var timer: Timer?
-    private var lastState: Bool?
-    private let onChange: (Bool) -> Void
+    private var lastResult: LidMonitorResult?
+    private let onChange: (LidMonitorResult) -> Void
 
-    init(onChange: @escaping (Bool) -> Void) {
+    init(onChange: @escaping (LidMonitorResult) -> Void) {
         self.onChange = onChange
     }
 
@@ -25,19 +31,20 @@ final class SystemLidMonitor {
     }
 
     private func poll() {
-        guard let current = readClamshellState() else { return }
-        if current != lastState {
-            lastState = current
-            onChange(current)
+        let result = readClamshellState()
+        if result != lastResult {
+            lastResult = result
+            onChange(result)
         }
     }
 
-    private func readClamshellState() -> Bool? {
+    private func readClamshellState() -> LidMonitorResult {
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
-        guard service != IO_OBJECT_NULL else { return nil }
+        guard service != IO_OBJECT_NULL else { return .unavailable }
         defer { IOObjectRelease(service) }
         let key = "AppleClamshellState" as CFString
-        guard let value = IORegistryEntryCreateCFProperty(service, key, kCFAllocatorDefault, 0) else { return nil }
-        return (value.takeRetainedValue() as? Bool)
+        guard let value = IORegistryEntryCreateCFProperty(service, key, kCFAllocatorDefault, 0),
+              let state = value.takeRetainedValue() as? Bool else { return .readFailed }
+        return .state(state)
     }
 }

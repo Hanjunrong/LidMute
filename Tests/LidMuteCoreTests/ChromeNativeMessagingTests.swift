@@ -130,6 +130,25 @@ final class ChromeNativeMessagingTests: XCTestCase {
         }
     }
 
+    func testHostReportsOnlyNewDurableAcceptancesToTheSessionCallback() throws {
+        let recorder = AcceptedEventRecorder()
+        let dispositions: [ChromeAcceptDisposition] = [
+            .accepted(eventID),
+            .duplicate(eventID),
+            .ignoredIncognito(eventID),
+        ]
+
+        for disposition in dispositions {
+            let session = NativeHostSession(
+                acceptor: FakeChromeAcceptor(result: .success(disposition)),
+                onAccepted: { recorder.record($0) }
+            )
+            _ = try session.receive(wire(validPayload()))
+        }
+
+        XCTAssertEqual(recorder.eventIDs, [eventID])
+    }
+
     func testHostReturnsRetryableFailureWhenDurabilityFails() throws {
         let acceptor = FakeChromeAcceptor(result: .failure(.retryablePersistenceFailure))
 
@@ -210,6 +229,14 @@ final class ChromeNativeMessagingTests: XCTestCase {
         let text = String(decoding: validPayload(), as: UTF8.self)
         return Data(text.replacingOccurrences(of: target, with: replacement).utf8)
     }
+}
+
+private final class AcceptedEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEventIDs: [UUID] = []
+
+    var eventIDs: [UUID] { lock.withLock { storedEventIDs } }
+    func record(_ eventID: UUID) { lock.withLock { storedEventIDs.append(eventID) } }
 }
 
 private final class FakeChromeAcceptor: ChromeFrameAccepting, @unchecked Sendable {
