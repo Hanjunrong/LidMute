@@ -1,6 +1,6 @@
 import Foundation
 
-enum ChromeManifestInspection: Equatable {
+enum ChromeManifestInspection: Equatable, Sendable {
     case notRegistered
     case current
     case pathMismatch(expected: String, registered: String)
@@ -13,16 +13,19 @@ enum ChromeHostRegistrationError: Error, Equatable {
     case malformedManifest
 }
 
-@MainActor
-protocol ChromeHostRegistering {
+protocol ChromeManifestInspecting: Sendable {
     func inspect(expectedHostPath: URL) -> ChromeManifestInspection
+}
+
+@MainActor
+protocol ChromeHostRegistering: ChromeManifestInspecting {
     func repair(expectedHostPath: URL) throws
 }
 
-struct ChromeHostRegistration: ChromeHostRegistering {
-    private let manifestURL: URL
-    private let originURL: URL
-    private let fileManager: FileManager
+struct ChromeHostRegistration: ChromeHostRegistering, @unchecked Sendable {
+    nonisolated private let manifestURL: URL
+    nonisolated private let originURL: URL
+    nonisolated(unsafe) private let fileManager: FileManager
     private let isExecutableFile: (String) -> Bool
 
     init(
@@ -37,10 +40,12 @@ struct ChromeHostRegistration: ChromeHostRegistering {
         self.isExecutableFile = isExecutableFile ?? fileManager.isExecutableFile(atPath:)
     }
 
-    func inspect(expectedHostPath: URL) -> ChromeManifestInspection {
+    nonisolated func inspect(expectedHostPath: URL) -> ChromeManifestInspection {
         guard fileManager.fileExists(atPath: manifestURL.path) else { return .notRegistered }
         guard let manifest = try? readManifest(),
-              let registeredPath = manifest["path"] as? String else { return .malformed }
+              let registeredPath = try? validatedRegisteredPath(in: manifest) else {
+            return .malformed
+        }
 
         let expected = expectedHostPath.standardizedFileURL.path
         let registered = URL(filePath: registeredPath).standardizedFileURL.path
@@ -56,18 +61,8 @@ struct ChromeHostRegistration: ChromeHostRegistering {
         }
 
         var manifest = try readManifest()
-        guard manifest["name"] is String,
-              manifest["description"] is String,
-              manifest["type"] is String,
-              manifest["path"] is String,
-              let allowedOrigins = manifest["allowed_origins"] as? [String],
-              allowedOrigins.count == 1 else {
-            throw ChromeHostRegistrationError.malformedManifest
-        }
+        _ = try validatedRegisteredPath(in: manifest)
         let origin = try registeredOrigin()
-        guard allowedOrigins == [origin] else {
-            throw ChromeHostRegistrationError.malformedManifest
-        }
 
         manifest["path"] = expectedPath
         manifest["allowed_origins"] = [origin]
@@ -86,7 +81,7 @@ struct ChromeHostRegistration: ChromeHostRegistering {
         )
     }
 
-    private func readManifest() throws -> [String: Any] {
+    nonisolated private func readManifest() throws -> [String: Any] {
         do {
             let object = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL))
             guard let manifest = object as? [String: Any] else {
@@ -100,7 +95,20 @@ struct ChromeHostRegistration: ChromeHostRegistering {
         }
     }
 
-    private func registeredOrigin() throws -> String {
+    nonisolated private func validatedRegisteredPath(in manifest: [String: Any]) throws -> String {
+        let origin = try registeredOrigin()
+        guard manifest["name"] as? String == "com.lidmute.nativehost",
+              manifest["description"] is String,
+              manifest["type"] as? String == "stdio",
+              let path = manifest["path"] as? String,
+              let allowedOrigins = manifest["allowed_origins"] as? [String],
+              allowedOrigins == [origin] else {
+            throw ChromeHostRegistrationError.malformedManifest
+        }
+        return path
+    }
+
+    nonisolated private func registeredOrigin() throws -> String {
         guard let origin = try? String(contentsOf: originURL, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
               origin.hasPrefix("chrome-extension://"), origin.hasSuffix("/") else {

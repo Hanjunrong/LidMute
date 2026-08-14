@@ -7,6 +7,18 @@ private enum AppObservationClearTestError: Error {
     case injectedFailure
 }
 
+private final class ThrowingAcceptanceStore: ChromeHostAcceptancePersisting, @unchecked Sendable {
+    func write(_: ChromeHostAcceptance) throws {}
+    func readFreshness(nowUptime _: TimeInterval, ttl _: TimeInterval) -> HeartbeatFreshness { .stale }
+    func remove() throws { throw AppObservationClearTestError.injectedFailure }
+}
+
+private struct WaitingAppHealthCollector: AppHealthIOCollecting {
+    func collect(nowUptime _: TimeInterval, expectedHostPath _: URL) -> ChromeHealthIOResult {
+        ChromeHealthIOResult(manifest: .current, heartbeat: .stale, acceptance: .stale)
+    }
+}
+
 private final class CountingEventStore: EventStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var storedEvents: [LidMuteEvent]
@@ -228,6 +240,89 @@ private final class PausingInboxConsumer: ChromeInboxConsuming, @unchecked Senda
     }
 
     func resetInMemoryState() {}
+}
+
+private final class PausingHealthProjectionInboxConsumer: ChromeInboxConsuming, @unchecked Sendable {
+    private let condition = NSCondition()
+    private let outcome: Result<ChromeConsumeBatch, ChromeConsumeError>
+    private var waiting = false
+    private var resumed = false
+
+    init(outcome: Result<ChromeConsumeBatch, ChromeConsumeError>) {
+        self.outcome = outcome
+    }
+
+    var isWaiting: Bool { condition.withLock { waiting } }
+
+    func consumeAvailable() throws -> ChromeConsumeBatch {
+        condition.lock()
+        waiting = true
+        condition.broadcast()
+        while !resumed { condition.wait() }
+        waiting = false
+        condition.unlock()
+        return try outcome.get()
+    }
+
+    func acknowledgeDelivery(_: UUID) throws {}
+    func resetInMemoryState() {}
+
+    func resume() {
+        condition.withLock {
+            resumed = true
+            condition.broadcast()
+        }
+    }
+}
+
+private final class PausingAcknowledgementHealthConsumer: ChromeInboxConsuming, @unchecked Sendable {
+    private let condition = NSCondition()
+    private let batch: ChromeConsumeBatch
+    private let staleAcknowledgementSucceeds: Bool
+    private var acknowledgeCount = 0
+    private var acknowledgementPaused = false
+    private var acknowledgementReleased = false
+
+    init(record: ChromeInboxRecord, staleAcknowledgementSucceeds: Bool) {
+        batch = ChromeConsumeBatch(
+            records: [record],
+            deliveryID: UUID(),
+            committedOffset: 0,
+            health: .healthy
+        )
+        self.staleAcknowledgementSucceeds = staleAcknowledgementSucceeds
+    }
+
+    var isAcknowledgementPaused: Bool { condition.withLock { acknowledgementPaused } }
+
+    func consumeAvailable() throws -> ChromeConsumeBatch { batch }
+
+    func acknowledgeDelivery(_: UUID) throws {
+        condition.lock()
+        acknowledgeCount += 1
+        let shouldSeedFailure = staleAcknowledgementSucceeds && acknowledgeCount == 1
+        if shouldSeedFailure {
+            condition.unlock()
+            throw ChromeConsumeError.permissionFailure
+        }
+        acknowledgementPaused = true
+        condition.broadcast()
+        while !acknowledgementReleased { condition.wait() }
+        acknowledgementPaused = false
+        condition.unlock()
+        if !staleAcknowledgementSucceeds {
+            throw ChromeConsumeError.permissionFailure
+        }
+    }
+
+    func resetInMemoryState() {}
+
+    func releaseAcknowledgement() {
+        condition.withLock {
+            acknowledgementReleased = true
+            condition.broadcast()
+        }
+    }
 }
 
 private final class RecordingObservationClearer: ObservationClearing, @unchecked Sendable {
@@ -508,7 +603,8 @@ private final class AppViewModelHarness {
         deliveryID: UUID? = nil,
         clearFailures: [ObservationClearCategory] = [],
         inboxConsumer: (any ChromeInboxConsuming)? = nil,
-        observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil
+        observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil,
+        acceptanceStore: (any ChromeHostAcceptancePersisting)? = nil
     ) throws {
         root = FileManager.default.temporaryDirectory
             .appending(path: "lidmute-app-observation-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -529,7 +625,9 @@ private final class AppViewModelHarness {
             observationStore: clearer,
             lifecycle: lifecycle,
             chromeManifestURL: manifestURL,
-            observationPipelineCoordinator: observationPipelineCoordinator
+            observationPipelineCoordinator: observationPipelineCoordinator,
+            acceptanceStore: acceptanceStore,
+            healthIOCollector: WaitingAppHealthCollector()
         )
         model.chromeExtensionId = registeredExtensionID
     }
@@ -569,6 +667,17 @@ private func appRecord() -> ChromeInboxRecord {
             isPinned: false,
             isIncognito: false
         )
+    )
+}
+
+private func chromeAudioProcess() -> AudioProcess {
+    AudioProcess(
+        pid: 42,
+        name: "Google Chrome",
+        bundleID: "com.google.Chrome",
+        executablePath: nil,
+        launchDate: nil,
+        isOutputActive: true
     )
 }
 
@@ -866,8 +975,9 @@ func clearRemovesChromePresentationButKeepsRegistration() async throws {
         events: [appEvent(1, chromeTab: record.evidence)],
         records: [record]
     )
+    harness.model.receiveAudioPollResult(.success([chromeAudioProcess()]))
     await harness.model.pollChromeInbox()
-    #expect(harness.model.chromeBridgeStatus == "已接收 Chrome 标签页事件")
+    #expect(harness.model.currentAudioSources.contains { $0.chromeTab == record.evidence })
 
     await harness.model.clearObservationData()
 
@@ -932,7 +1042,8 @@ func staleChromePollCannotRepublishPresentationWhileClearOwnsTheEpoch() async th
         observationStore: store,
         lifecycle: MutableLifecycleState(.ready),
         chromeManifestURL: manifestURL,
-        observationPipelineCoordinator: coordinator
+        observationPipelineCoordinator: coordinator,
+        healthIOCollector: WaitingAppHealthCollector()
     )
 
     let poll = Task { @MainActor in await model.pollChromeInbox() }
@@ -951,6 +1062,73 @@ func staleChromePollCannotRepublishPresentationWhileClearOwnsTheEpoch() async th
     store.resumePausedClear()
     await poll.value
     await clear.value
+}
+
+@MainActor
+@Test(arguments: [false, true])
+func staleChromePollCannotPublishSuccessOrFailureHealthAfterClear(fails: Bool) async throws {
+    let outcome: Result<ChromeConsumeBatch, ChromeConsumeError> = fails
+        ? .failure(.permissionFailure)
+        : .success(ChromeConsumeBatch(
+            records: [],
+            committedOffset: 0,
+            health: .permissionFailure
+        ))
+    let consumer = PausingHealthProjectionInboxConsumer(outcome: outcome)
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        inboxConsumer: consumer
+    )
+
+    let poll = Task { @MainActor in await harness.model.pollChromeInbox() }
+    for _ in 0..<100 where !consumer.isWaiting { await Task.yield() }
+    #expect(consumer.isWaiting)
+
+    await harness.model.clearObservationData()
+    consumer.resume()
+    await poll.value
+
+    #expect(harness.model.storageStatusText.isEmpty)
+    #expect(harness.model.health.storage == .healthy)
+}
+
+@MainActor
+@Test(arguments: [false, true])
+func staleAcknowledgementCannotPublishSuccessOrFailureHealthAfterClear(
+    staleAcknowledgementSucceeds: Bool
+) async throws {
+    let consumer = PausingAcknowledgementHealthConsumer(
+        record: appRecord(),
+        staleAcknowledgementSucceeds: staleAcknowledgementSucceeds
+    )
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        inboxConsumer: consumer,
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
+    )
+    if staleAcknowledgementSucceeds {
+        await harness.model.pollChromeInbox()
+        #expect(harness.model.health.storage == .permissionFailed)
+    }
+
+    let poll = Task { @MainActor in await harness.model.pollChromeInbox() }
+    for _ in 0..<100 where !consumer.isAcknowledgementPaused { await Task.yield() }
+    #expect(consumer.isAcknowledgementPaused)
+    let clear = Task { @MainActor in await harness.model.clearObservationData() }
+    for _ in 0..<100 where !harness.model.isClearingObservationData { await Task.yield() }
+    #expect(harness.model.isClearingObservationData)
+
+    consumer.releaseAcknowledgement()
+    await poll.value
+    await clear.value
+
+    if staleAcknowledgementSucceeds {
+        #expect(harness.model.health.storage == .permissionFailed)
+        #expect(!harness.model.storageStatusText.isEmpty)
+    } else {
+        #expect(harness.model.health.storage == .healthy)
+        #expect(harness.model.storageStatusText.isEmpty)
+    }
 }
 
 @MainActor
@@ -1155,6 +1333,23 @@ func partialClearReportIsPassedToCoordinatorClearBoundary() async throws {
 
 @MainActor
 @Test
+func acceptanceMarkerClearFailureIsReportedInsteadOfSilentlySwallowed() async throws {
+    let coordinator = OutcomeChromeEvidenceCoordinator(result: .notRequired)
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        observationPipelineCoordinator: coordinator,
+        acceptanceStore: ThrowingAcceptanceStore()
+    )
+
+    await harness.model.clearObservationData()
+
+    #expect(coordinator.endedClearReports.count == 1)
+    #expect(coordinator.endedClearReports[0]?.failures == [.acceptance])
+    #expect(harness.model.storageStatusText == "部分数据未清空：acceptance")
+}
+
+@MainActor
+@Test
 func partialInboxClearKeepsExistingChromePresentation() async throws {
     let record = appRecord()
     let harness = try AppViewModelHarness(
@@ -1163,13 +1358,14 @@ func partialInboxClearKeepsExistingChromePresentation() async throws {
         clearFailures: [.inbox],
         observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
     )
+    harness.model.receiveAudioPollResult(.success([chromeAudioProcess()]))
     await harness.model.pollChromeInbox()
-    #expect(harness.model.chromeBridgeStatus == "已接收 Chrome 标签页事件")
+    #expect(harness.model.currentAudioSources.contains { $0.chromeTab == record.evidence })
 
     harness.lifecycle.state = .recovering
     await harness.model.clearObservationData()
 
-    #expect(harness.model.chromeBridgeStatus == "已接收 Chrome 标签页事件")
+    #expect(harness.model.currentAudioSources.contains { $0.chromeTab == record.evidence })
 }
 
 @MainActor
@@ -1193,7 +1389,8 @@ func eventsClearFailureKeepsTimelineVisibleAndConsistentAfterRestart() async thr
         observationStore: clearer,
         lifecycle: lifecycle,
         chromeManifestURL: manifestURL,
-        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected),
+        healthIOCollector: WaitingAppHealthCollector()
     )
     let timelineBeforeClear = model.events
 

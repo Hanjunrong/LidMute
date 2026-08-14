@@ -24,6 +24,17 @@ private final class ChromeRegistrationFixture {
     }
 
     deinit { try? FileManager.default.removeItem(at: root) }
+
+    func overwriteManifest(name: String, type: String, allowedOrigins: [String]) throws {
+        let manifest: [String: Any] = [
+            "name": name,
+            "description": "LidMute Chrome bridge",
+            "path": "/Applications/LidMute.app/Contents/MacOS/LidMuteNativeHost",
+            "type": type,
+            "allowed_origins": allowedOrigins,
+        ]
+        try JSONSerialization.data(withJSONObject: manifest).write(to: manifestURL)
+    }
 }
 
 @MainActor @Test func movedBundleIsDetectedAndRepairPreservesRegisteredOrigin() throws {
@@ -74,5 +85,34 @@ private final class ChromeRegistrationFixture {
     )
     #expect(throws: ChromeHostRegistrationError.expectedHostNotExecutable) {
         try service.repair(expectedHostPath: URL(filePath: "/missing/host"))
+    }
+}
+
+@MainActor @Test(arguments: [
+    ("wrong.host.name", "stdio", ["chrome-extension://abcdefghijklmnopabcdefghijklmnop/"]),
+    ("com.lidmute.nativehost", "not-stdio", ["chrome-extension://abcdefghijklmnopabcdefghijklmnop/"]),
+    ("com.lidmute.nativehost", "stdio", ["chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/"]),
+    ("com.lidmute.nativehost", "stdio", ["https://example.com/"]),
+])
+func inspectAndRepairRejectInvalidFixedManifestContract(
+    name: String,
+    type: String,
+    allowedOrigins: [String]
+) throws {
+    let expected = URL(filePath: "/Applications/LidMute.app/Contents/MacOS/LidMuteNativeHost")
+    let fixture = try ChromeRegistrationFixture(
+        registeredHostPath: expected.path,
+        registeredOrigin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+    )
+    try fixture.overwriteManifest(name: name, type: type, allowedOrigins: allowedOrigins)
+    let service = ChromeHostRegistration(
+        manifestURL: fixture.manifestURL,
+        originURL: fixture.originURL,
+        isExecutableFile: { _ in true }
+    )
+
+    #expect(service.inspect(expectedHostPath: expected) == .malformed)
+    #expect(throws: ChromeHostRegistrationError.malformedManifest) {
+        try service.repair(expectedHostPath: expected)
     }
 }

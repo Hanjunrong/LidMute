@@ -2,6 +2,9 @@ import Darwin
 import Dispatch
 import Foundation
 
+@_silgen_name("flock")
+private func systemFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
+
 public struct ChromeHostHeartbeat: Codable, Equatable, Sendable {
     public static let schemaVersion = 1
 
@@ -31,18 +34,26 @@ public protocol ChromeHostHeartbeatPersisting: Sendable {
 }
 
 public struct ChromeHostAcceptance: Codable, Equatable, Sendable {
-    public static let schemaVersion = 1
+    public static let schemaVersion = 2
 
     public let version: Int
     public let sessionToken: UUID
     public let pid: Int32
     public let uptime: TimeInterval
+    public let generation: UInt64
 
-    public init(version: Int, sessionToken: UUID, pid: Int32, uptime: TimeInterval) {
+    public init(
+        version: Int,
+        sessionToken: UUID,
+        pid: Int32,
+        uptime: TimeInterval,
+        generation: UInt64 = 0
+    ) {
         self.version = version
         self.sessionToken = sessionToken
         self.pid = pid
         self.uptime = uptime
+        self.generation = generation
     }
 }
 
@@ -52,20 +63,104 @@ public protocol ChromeHostAcceptancePersisting: Sendable {
     func remove() throws
 }
 
+protocol ChromeHostFileLocking: Sendable {
+    func withExclusiveLock<T>(_ body: () throws -> T) throws -> T
+}
+
+final class POSIXChromeHostFileLock: ChromeHostFileLocking, @unchecked Sendable {
+    private final class Registry: @unchecked Sendable {
+        private let mutex = NSLock()
+        private var locks: [String: POSIXChromeHostFileLock] = [:]
+
+        func lock(for url: URL) -> POSIXChromeHostFileLock {
+            mutex.withLock {
+                let path = url.standardizedFileURL.path
+                if let existing = locks[path] { return existing }
+                let lock = POSIXChromeHostFileLock(lockURL: URL(fileURLWithPath: path))
+                locks[path] = lock
+                return lock
+            }
+        }
+    }
+
+    private static let registry = Registry()
+
+    static func shared(for lockURL: URL) -> POSIXChromeHostFileLock {
+        registry.lock(for: lockURL)
+    }
+
+    private let lockURL: URL
+    private let mutex = NSRecursiveLock()
+    private var depth = 0
+
+    private init(lockURL: URL) {
+        self.lockURL = lockURL
+    }
+
+    func withExclusiveLock<T>(_ body: () throws -> T) throws -> T {
+        mutex.lock()
+        defer { mutex.unlock() }
+
+        if depth > 0 {
+            depth += 1
+            defer { depth -= 1 }
+            return try body()
+        }
+
+        let fileManager = FileManager.default
+        let directory = lockURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw currentPOSIXError() }
+        defer { Darwin.close(descriptor) }
+        guard Darwin.fchmod(descriptor, 0o600) == 0 else { throw currentPOSIXError() }
+        try acquireFlock(descriptor)
+        defer { releaseFlock(descriptor) }
+
+        depth = 1
+        defer { depth = 0 }
+        return try body()
+    }
+
+    private func acquireFlock(_ descriptor: Int32) throws {
+        while systemFlock(descriptor, LOCK_EX) != 0 {
+            if errno != EINTR { throw currentPOSIXError() }
+        }
+    }
+
+    private func releaseFlock(_ descriptor: Int32) {
+        while systemFlock(descriptor, LOCK_UN) != 0, errno == EINTR {}
+    }
+
+    private func currentPOSIXError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+}
+
+private func heartbeatLockURL(for heartbeatURL: URL) -> URL {
+    heartbeatURL.deletingLastPathComponent()
+        .appending(path: ".\(heartbeatURL.lastPathComponent).lock")
+}
+
 public final class FileChromeHostAcceptanceStore: ChromeHostAcceptancePersisting, @unchecked Sendable {
     private let url: URL
     private let heartbeatURL: URL
+    private let generationURL: URL
     private let fileManager: FileManager
+    private let fileLock: ChromeHostFileLocking
 
     public init(url: URL, heartbeatURL: URL, fileManager: FileManager = .default) {
         self.url = url
         self.heartbeatURL = heartbeatURL
+        generationURL = url.deletingLastPathComponent().appending(path: "observation-generation")
         self.fileManager = fileManager
+        fileLock = POSIXChromeHostFileLock.shared(for: heartbeatLockURL(for: heartbeatURL))
     }
 
     public func write(_ acceptance: ChromeHostAcceptance) throws {
-        try prepareDirectory()
-        try withHeartbeatLock(exclusive: true) {
+        try fileLock.withExclusiveLock {
             guard let heartbeat = readHeartbeatLocked(),
                   heartbeat.version == ChromeHostHeartbeat.schemaVersion,
                   heartbeat.sessionToken == acceptance.sessionToken,
@@ -78,8 +173,13 @@ public final class FileChromeHostAcceptanceStore: ChromeHostAcceptancePersisting
         nowUptime: TimeInterval,
         ttl: TimeInterval
     ) -> HeartbeatFreshness {
-        guard let acceptance = try? withHeartbeatLock(exclusive: false, readAcceptanceLocked),
+        guard let state = try? fileLock.withExclusiveLock({
+            (readAcceptanceLocked(), readGenerationLocked())
+        }),
+              let acceptance = state.0,
+              let generation = state.1,
               acceptance.version == ChromeHostAcceptance.schemaVersion else { return .malformed }
+        guard acceptance.generation == generation else { return .stale }
         guard acceptance.uptime >= 0,
               acceptance.uptime <= nowUptime,
               nowUptime - acceptance.uptime <= ttl else { return .stale }
@@ -87,20 +187,14 @@ public final class FileChromeHostAcceptanceStore: ChromeHostAcceptancePersisting
     }
 
     public func remove() throws {
-        guard fileManager.fileExists(atPath: url.path) else { return }
-        try withHeartbeatLock(exclusive: true) {
+        try fileLock.withExclusiveLock {
+            guard fileManager.fileExists(atPath: url.path) else { return }
             do {
                 try fileManager.removeItem(at: url)
             } catch CocoaError.fileNoSuchFile {
                 return
             }
         }
-    }
-
-    private func prepareDirectory() throws {
-        let directory = url.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
     private func writeLocked(_ acceptance: ChromeHostAcceptance) throws {
@@ -124,19 +218,12 @@ public final class FileChromeHostAcceptanceStore: ChromeHostAcceptancePersisting
         return try? JSONDecoder().decode(ChromeHostAcceptance.self, from: data)
     }
 
-    private func withHeartbeatLock<T>(exclusive: Bool, _ body: () throws -> T) throws -> T {
-        let lockURL = heartbeatURL.deletingLastPathComponent()
-            .appending(path: ".\(heartbeatURL.lastPathComponent).lock")
-        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { Darwin.close(descriptor) }
-        guard Darwin.lockf(descriptor, F_LOCK, 0) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { _ = Darwin.lockf(descriptor, F_ULOCK, 0) }
-        return try body()
+    private func readGenerationLocked() -> UInt64? {
+        guard let data = try? Data(contentsOf: generationURL) else { return 0 }
+        let value = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return 0 }
+        return UInt64(value)
     }
 }
 
@@ -144,11 +231,13 @@ public final class FileChromeHostHeartbeatStore: ChromeHostHeartbeatPersisting, 
     private let url: URL
     private let fileManager: FileManager
     private let beforeConditionalRemove: (@Sendable () -> Void)?
+    private let fileLock: ChromeHostFileLocking
 
     public init(url: URL, fileManager: FileManager = .default) {
         self.url = url
         self.fileManager = fileManager
         beforeConditionalRemove = nil
+        fileLock = POSIXChromeHostFileLock.shared(for: heartbeatLockURL(for: url))
     }
 
     init(
@@ -159,11 +248,11 @@ public final class FileChromeHostHeartbeatStore: ChromeHostHeartbeatPersisting, 
         self.url = url
         self.fileManager = fileManager
         self.beforeConditionalRemove = beforeConditionalRemove
+        fileLock = POSIXChromeHostFileLock.shared(for: heartbeatLockURL(for: url))
     }
 
     public func write(_ heartbeat: ChromeHostHeartbeat) throws {
-        try prepareDirectory()
-        try withFileLock(exclusive: true) {
+        try fileLock.withExclusiveLock {
             try writeLocked(heartbeat)
         }
     }
@@ -172,7 +261,7 @@ public final class FileChromeHostHeartbeatStore: ChromeHostHeartbeatPersisting, 
         nowUptime: TimeInterval,
         ttl: TimeInterval = 6
     ) -> HeartbeatFreshness {
-        guard let heartbeat = try? withFileLock(exclusive: false, readHeartbeatLocked),
+        guard let heartbeat = try? fileLock.withExclusiveLock(readHeartbeatLocked),
               heartbeat.version == ChromeHostHeartbeat.schemaVersion else { return .malformed }
         guard heartbeat.uptime >= 0,
               heartbeat.uptime <= nowUptime,
@@ -181,16 +270,16 @@ public final class FileChromeHostHeartbeatStore: ChromeHostHeartbeatPersisting, 
     }
 
     public func remove() throws {
-        guard fileManager.fileExists(atPath: url.path) else { return }
-        try withFileLock(exclusive: true) {
+        try fileLock.withExclusiveLock {
+            guard fileManager.fileExists(atPath: url.path) else { return }
             try removeLocked()
         }
     }
 
     @discardableResult
     func remove(ifSessionToken expectedToken: UUID) throws -> Bool {
-        guard fileManager.fileExists(atPath: url.path) else { return false }
-        return try withFileLock(exclusive: true) {
+        return try fileLock.withExclusiveLock {
+            guard fileManager.fileExists(atPath: url.path) else { return false }
             guard readHeartbeatLocked()?.sessionToken == expectedToken else { return false }
             beforeConditionalRemove?()
             try removeLocked()
@@ -199,19 +288,12 @@ public final class FileChromeHostHeartbeatStore: ChromeHostHeartbeatPersisting, 
     }
 
     func refresh(_ heartbeat: ChromeHostHeartbeat) throws {
-        try prepareDirectory()
-        try withFileLock(exclusive: true) {
+        try fileLock.withExclusiveLock {
             if let current = readHeartbeatLocked(), current.sessionToken != heartbeat.sessionToken {
                 return
             }
             try writeLocked(heartbeat)
         }
-    }
-
-    private func prepareDirectory() throws {
-        let directory = url.deletingLastPathComponent()
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
     private func writeLocked(_ heartbeat: ChromeHostHeartbeat) throws {
@@ -236,21 +318,6 @@ public final class FileChromeHostHeartbeatStore: ChromeHostHeartbeatPersisting, 
         } catch CocoaError.fileNoSuchFile {
             return
         }
-    }
-
-    private func withFileLock<T>(exclusive: Bool, _ body: () throws -> T) throws -> T {
-        let lockURL = url.deletingLastPathComponent()
-            .appending(path: ".\(url.lastPathComponent).lock")
-        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard descriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { Darwin.close(descriptor) }
-        guard Darwin.lockf(descriptor, F_LOCK, 0) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { _ = Darwin.lockf(descriptor, F_ULOCK, 0) }
-        return try body()
     }
 }
 

@@ -64,6 +64,42 @@ All Swift commands used isolated `/tmp` module caches and `--disable-sandbox` af
 - Privacy/source scans: exit 0; no `kill(...)` liveness inference, one Logger construction confined to the typed adapter, exact `heartbeatInterval: 2`, exact `ttl: 6`, `ProcessInfo.processInfo.systemUptime`, and unchanged zero card spacing.
 - `git diff --check`: exit 0.
 
+## Formal review fix round 2 — stale acknowledgement and single-source presentation
+
+### Important: stale acknowledgement health publication
+
+- RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-red-build --filter staleAcknowledgementCannotPublishSuccessOrFailureHealthAfterClear`
+- RED result: exit 1. The stale failure changed Chrome health from healthy to `permissionFailed`, and the stale success incorrectly cleared an existing `permissionFailed` state after clear advanced the observation boundary.
+- GREEN command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-green-build --filter 'staleAcknowledgementCannotPublishSuccessOrFailureHealthAfterClear|backlogPresentationCannotDivergeFromNonfreshTypedHealth|lidUnavailableAndReadFailureHaveDistinctHealth'`
+- GREEN result: exit 0; 3 test functions / 4 parameterized executions passed. Both acknowledgement success and failure now recheck lifecycle, clear state, and observation epoch after the awaited acknowledgement boundary before publishing health.
+
+### Important: typed health is the sole Chrome presentation source
+
+- RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-red-build --filter backlogPresentationCannotDivergeFromNonfreshTypedHealth`
+- RED result: exit 1. Typed Chrome health was waiting while the independently stored legacy presentation reported `.receivedEvent` / `已接收 Chrome 标签页事件`.
+- GREEN result: included in the combined GREEN command above. The legacy connection state, status copy, and manifest-repair capability are computed only from `health.chrome`; all direct legacy writers were removed.
+
+### Important: I/O-free refresh retains local lid/recovery projection
+
+- RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-red-build --filter lidUnavailableAndReadFailureHaveDistinctHealth`
+- RED result: exit 1. Lid health remained `.unavailable` after the monitor recovered to `.state(false)` because removing Chrome health I/O from `refresh()` had also removed local health projection.
+- GREEN result: included in the combined GREEN command above. `refreshLocalHealth()` now projects lid and recovery synchronously; both `refresh()` and `refreshHealth()` call it without putting Chrome file I/O back on the safety predecessor.
+- Focused health suite: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-green-build --filter AppViewModelHealthTests` exited 0; 16 test functions passed, 0 failed.
+- Focused observation suite: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-green-build --filter AppViewModelObservationTests` exited 0; 32 test functions passed, 0 failed, including both stale-acknowledgement parameter cases.
+
+### Fresh verification after round 2
+
+- Focused command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-final-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-final-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-final-build --filter 'AppViewModelHealthTests|AppViewModelObservationTests|ObservationClearTests|ChromeHostHeartbeatTests|ChromeNativeMessagingTests|ChromeHostRegistrationTests'`
+- Focused result: exit 0; 16 XCTest cases plus 69 Swift Testing test functions passed with 0 failures.
+- Full Swift command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review2-full-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review2-full-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review2-full-build`
+- Full Swift result: exit 0; 125 XCTest cases plus 86 Swift Testing test functions passed with 0 failures.
+- Node command: `node --test ChromeExtension/service-worker.test.mjs`; exit 0, 17 passed, 0 failed.
+- Visual command: `bash Scripts/check-visual-principles.sh`; exit 0 with `PASS visual principle source checks`.
+- Bundle command: `LIDMUTE_SCRATCH_PATH=/tmp/lidmute-task10-review2-bundle-build zsh Scripts/make-app-bundle.sh`; exit 0, `dist/LidMute.app` created and its ad-hoc signature replaced.
+- Smoke command: `zsh Scripts/run-smoke-check.sh`; exit 0 after 125 XCTest cases, 86 Swift Testing functions, 17 Node tests, visual checks, and app-bundle builds; final line `PASS LidMute smoke check`.
+- Privacy/source scan and `git diff --check`: exit 0. The scan found exactly one Logger construction, no `kill(pid, 0)` liveness inference, exact 2-second heartbeat and 6-second TTL contracts, monotonic uptime, unchanged `cardSpacing: Double = 0`, and no event ID/title/URL/frame/evidence fields in `ChromeHostAcceptance`.
+- Fresh independent scoped re-review: `APPROVED`, with no remaining findings. The reviewer independently passed 6 focused concurrency/safety regressions (including both stale-acknowledgement cases) and 19 XCTest plus 2 Swift Testing clear/lid/route/privacy regressions; confirmed health I/O remains outside the safety executor, shared locking and generation-fenced acceptance clear are sound, typed health is the sole Chrome presentation source, all preserved constraints remain intact, and no Task 11 changes were present.
+
 ## Self-review
 
 - Speaker mutations remain exclusively behind `SpeakerRecoveryRuntime` / `SpeakerProtectionApplying`; `ProtectionCoordinator` was not given audio mutation capability.
@@ -79,3 +115,86 @@ All Swift commands used isolated `/tmp` module caches and `--disable-sandbox` af
 - The new accepted-event callback and sidecar were unit-tested but not exercised against a live Chrome Native Messaging connection; callback ordering composes with the existing test that proves `ObservationStore.accepted` occurs only after inbox and metadata sync.
 - No manual move of a signed `/Applications/LidMute.app` followed by clicking repair was performed; this is covered with real temporary JSON/origin files and an injected executable-file boundary.
 - The UI was source-contract/build verified, not visually inspected in a running macOS window for every health combination.
+
+## Formal review fix round 1 — shared heartbeat/acceptance locking
+
+- Root cause: the heartbeat and acceptance stores opened independent descriptors and used process-owned `lockf` locks, so calls from separate store instances in the same process did not exclude each other. The pre-lock existence checks also sat outside the transaction boundary.
+- RED command:
+  - `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-lock-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-lock-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-lock-red-build --filter 'replacementCannotSlipBetweenSessionComparisonAndRemoval|heartbeatWriteWaitsForAnExternalFlockHolder'`
+  - Result: exit 1. `replacementCannotSlipBetweenSessionComparisonAndRemoval` failed because the replacement completed before the paused removal was released (`.success` instead of `.timedOut`), then the old removal erased it (`.malformed` instead of the replacement's `.fresh` value). The real `/usr/bin/env lockf -k ...` subprocess test passed, establishing the pre-existing cross-process baseline.
+- First GREEN attempt:
+  - `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-lock-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-lock-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-lock-green-build --filter 'replacementCannotSlipBetweenSessionComparisonAndRemoval|heartbeatWriteWaitsForAnExternalFlockHolder'`
+  - Result: exit 1 at compile time because Swift 6 resolves `Darwin.flock` to the imported `flock` structure rather than the C function. The implementation was corrected to bind the same POSIX `flock(2)` symbol explicitly as `systemFlock`.
+- GREEN command:
+  - `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-lock-green2-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-lock-green2-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-lock-green2-build --filter 'replacementCannotSlipBetweenSessionComparisonAndRemoval|heartbeatWriteWaitsForAnExternalFlockHolder'`
+  - Result: exit 0; 2 tests passed, 0 failed. The replacement remained blocked until removal released the shared in-process mutex, and the Swift write remained blocked behind the real subprocess lock holder.
+- Final focused command after strengthening the subprocess assertion to decode the replacement heartbeat:
+  - `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-lock-final-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-lock-final-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-lock-final-build --filter ChromeHostHeartbeatTests`
+  - Result: exit 0; 8 test functions passed, 0 failed (including both parameterized impossible-uptime cases). The subprocess is stopped with bounded polling and a `SIGKILL` fallback; the final heartbeat was decoded and matched the expected session token/PID.
+- Implementation: both stores now obtain one strongly held lock domain keyed by the standardized absolute sibling lock path. A shared `NSRecursiveLock` serializes all same-process instances; the outermost entry creates the private directory, opens the `0600` lock file with `O_CLOEXEC`, enforces its mode, acquires `flock(LOCK_EX)` with `EINTR` retry, and releases/closes it on unwind. Existence checks now execute inside that lock.
+- `git diff --check -- Sources/LidMuteCore/ChromeHostHeartbeat.swift Tests/LidMuteCoreTests/ChromeHostHeartbeatTests.swift`: exit 0.
+
+## Formal review fix round 1 — remaining findings
+
+### Critical: health I/O cannot delay speaker safety
+
+- RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix1-red2-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix1-red2-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix1-red2-build --filter suspendedHealthIOCannotDelayALaterPhysicalLidClose`
+- RED result: exit 1 in 0.115 seconds with `Expectation failed: closeArrivedBeforeHealthRelease`; a blocked heartbeat read held the MainActor and prevented two later physical-lid events from reaching the safety pipeline.
+- GREEN command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix1-green2-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix1-green2-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix1-green2-build --filter suspendedHealthIOCannotDelayALaterPhysicalLidClose`
+- GREEN result: exit 0; the regression passed in 0.006 seconds. Manifest/heartbeat/acceptance collection now runs in detached utility work, while MainActor publishes only a completed immutable result. Local protection refresh is I/O-free. `olderHealthCollectionCannotOverwriteANewerPublishedGeneration` separately passed in 0.006 seconds, proving an older suspended result cannot overwrite a newer publication.
+
+### Important: stale Chrome poll health projections
+
+- RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix4-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix4-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix4-red-build --filter staleChromePollCannotPublishSuccessOrFailureHealthAfterClear`
+- RED result: exit 1; both parameterized cases failed. A stale successful batch and a stale thrown consume failure each published `permissionFailed` after clear had advanced the epoch.
+- GREEN command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix4-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix4-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix4-green-build --filter staleChromePollCannotPublishSuccessOrFailureHealthAfterClear`
+- GREEN result: exit 0; 2/2 cases passed. Lifecycle, shutdown, clear, and epoch fencing now precede success, failure, degradation, and storage-health projection.
+
+### Important: non-fresh heartbeat and atomic Chrome presentation
+
+- Heartbeat RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix5-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix5-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix5-red-build --filter missingOrMalformedHeartbeatWaitsForConnectionRatherThanClaimingBridgeFailure`
+- Heartbeat RED result: exit 1; missing/malformed heartbeat published typed `.degraded` and legacy `Chrome 通信异常` instead of waiting.
+- Presentation RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix6-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix6-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix6-red-build --filter typedAndLegacyChromePresentationPublishFromTheSameCompletedResult`
+- Presentation RED result: exit 1 after the behavior-sensitive run; typed health became connected while legacy state remained `.unknown` / `等待 Chrome 扩展连接`.
+- Focused GREEN command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-focused-app-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-focused-app-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-focused-app-green-build --filter AppViewModelHealthTests`
+- GREEN result: exit 0; 14 test functions passed, 0 failed. Missing, stopped, corrupt, impossible, and stale heartbeat projections wait for connection; actual manifest/bridge failures remain degraded. Typed health, legacy connection state, status copy, and repair capability publish atomically from one completed result.
+
+### Important: exact Native Messaging manifest contract
+
+- RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix7-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix7-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix7-red-build --filter inspectAndRepairRejectInvalidFixedManifestContract`
+- RED result: exit 1 with 6 issues across 4 cases; inspect accepted wrong fixed name/type and illegal or mismatched origins, while repair accepted wrong name/type.
+- GREEN command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-focused-app-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-focused-app-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-focused-app-green-build --filter ChromeHostRegistrationTests`
+- GREEN result: exit 0; 4 test functions / 7 executions passed. Inspect and repair both require exact `com.lidmute.nativehost`, exact `stdio`, a string description/path, and exactly one legal origin matching the registered origin file.
+
+### Important: acceptance marker clear linearization
+
+- Clear-failure RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix3-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix3-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix3-red-build --filter acceptanceMarkerClearFailureIsReportedInsteadOfSilentlySwallowed`
+- Clear-failure RED result: exit 1; the coordinator received an empty failure list and the UI remained empty because marker removal used `try?`.
+- Generation RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix3-generation-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix3-generation-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix3-generation-red-build --filter acceptanceMarkerFromClearedGenerationCannotRemainRecent`
+- Generation RED result: exit 1; a generation-0 marker remained fresh after observation generation advanced to 1.
+- GREEN commands:
+  - `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix3-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix3-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix3-green-build --filter acceptanceMarker`
+  - `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix3-green-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix3-green-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix3-green-build --filter newAcceptanceCannotSlipBetweenGenerationAdvanceAndMarkerReset`
+- GREEN result: exit 0; 3 marker tests passed, and the transaction regression passed in 0.207 seconds. Acceptance schema version 2 carries the observation generation. Clear advances generation and removes the marker within the observation lock, reports `.acceptance` on failure, and fences outstanding health collection. Native Host accepted-callback marker writes use the same observation-lock transaction, so a post-clear acceptance cannot be removed by the older clear.
+
+### Focused cross-checks after all review fixes
+
+- `ChromeHostHeartbeatTests`: 9 test functions passed, 0 failed, including same-process replacement exclusion, real subprocess `flock`, and generation-aware acceptance.
+- `ObservationClearTests`: 8 passed, 0 failed.
+- `ChromeNativeMessagingTests`: 16 XCTest cases passed, 0 failed.
+- `AppViewModelObservationTests`: 31 test functions / 32 executions passed, 0 failed.
+
+### Final verification after formal-review fixes
+
+- Full Swift command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-fix1-final-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-fix1-final-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-fix1-final-build`
+- Full Swift result: exit 0; 125 XCTest cases and 84 Swift Testing test functions passed with 0 failures.
+- Node command: `node --test ChromeExtension/service-worker.test.mjs`
+- Node result: exit 0; 17 passed, 0 failed.
+- Visual command: `bash Scripts/check-visual-principles.sh`
+- Visual result: exit 0; `PASS visual principle source checks`.
+- Bundle command: `LIDMUTE_SCRATCH_PATH=/tmp/lidmute-task10-fix1-bundle-build zsh Scripts/make-app-bundle.sh`
+- Bundle result: exit 0; `dist/LidMute.app` was created and its ad-hoc signature replaced successfully.
+- Smoke command: `zsh Scripts/run-smoke-check.sh`
+- Smoke result: exit 0 after the full Swift/Node runs, two visual checks, and two app-bundle builds; final line `PASS LidMute smoke check`.
+- Privacy/source scan: exit 0 with `set -e`; one Logger construction only, no `kill(pid, 0)` liveness inference, exact 2-second heartbeat, exact 6-second TTL, monotonic uptime calls only, unchanged `cardSpacing = 0`, and no event ID/title/URL/frame/evidence fields in `ChromeHostAcceptance`.
+- `git diff --check`: exit 0.

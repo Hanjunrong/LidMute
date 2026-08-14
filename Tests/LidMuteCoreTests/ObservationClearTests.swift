@@ -250,6 +250,13 @@ private func eventually(_ predicate: @escaping @Sendable () -> Bool) async throw
     throw ClearTestError.timeout
 }
 
+private func semaphoreWait(
+    _ semaphore: DispatchSemaphore,
+    timeout: DispatchTime
+) -> DispatchTimeoutResult {
+    semaphore.wait(timeout: timeout)
+}
+
 @Test
 func clearAdvancesGenerationAndRemovesPersistedAndInMemoryEvidence() throws {
     try withClearFixture { fixture in
@@ -368,6 +375,44 @@ func clearWaitsForAcceptInsideOldGenerationThenRemovesIt() async throws {
     #expect(try await clear.value.newGeneration == 1)
     #expect(try fixture.consumer.consumeAvailable().records.isEmpty)
     #expect(try fixture.events.recent(limit: 5_000).isEmpty)
+}
+
+@Test
+func newAcceptanceCannotSlipBetweenGenerationAdvanceAndMarkerReset() async throws {
+    let fixture = try ClearFixture()
+    let markerResetStarted = DispatchSemaphore(value: 0)
+    let allowMarkerReset = DispatchSemaphore(value: 0)
+    let acceptanceCompleted = DispatchSemaphore(value: 0)
+
+    let clear = Task.detached {
+        try fixture.observations.clearObservationData(
+            persistentReset: {
+                markerResetStarted.signal()
+                allowMarkerReset.wait()
+            },
+            inMemoryReset: {}
+        )
+    }
+    let markerStarted = await Task.detached {
+        semaphoreWait(markerResetStarted, timeout: .now() + 2) == .success
+    }.value
+    #expect(markerStarted)
+
+    let frame = fixture.frame()
+    let acceptance = Task.detached {
+        defer { acceptanceCompleted.signal() }
+        return try fixture.observations.accept(frame)
+    }
+    let remainedBlocked = await Task.detached {
+        semaphoreWait(acceptanceCompleted, timeout: .now() + 0.2) == .timedOut
+    }.value
+    #expect(remainedBlocked)
+
+    allowMarkerReset.signal()
+    let report = try await clear.value
+    #expect(report.isComplete)
+    #expect(try await acceptance.value == .accepted(frame.eventID))
+    #expect(try fixture.observations.readInboxRecords().map(\.generation) == [1])
 }
 
 @Test

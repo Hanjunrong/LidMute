@@ -84,6 +84,7 @@ public enum ObservationClearCategory: String, Codable, Equatable, Sendable {
     case deduplication
     case cursor
     case pendingDelivery = "pending_delivery"
+    case acceptance
     case memory
 }
 
@@ -107,6 +108,29 @@ public struct ObservationClearReport: Equatable, Sendable {
 
 public protocol ObservationClearing: AnyObject, Sendable {
     func clearObservationData(inMemoryReset: () throws -> Void) throws -> ObservationClearReport
+    func clearObservationData(
+        persistentReset: () throws -> Void,
+        inMemoryReset: () throws -> Void
+    ) throws -> ObservationClearReport
+}
+
+public extension ObservationClearing {
+    func clearObservationData(
+        persistentReset: () throws -> Void,
+        inMemoryReset: () throws -> Void
+    ) throws -> ObservationClearReport {
+        let report = try clearObservationData(inMemoryReset: inMemoryReset)
+        do {
+            try persistentReset()
+            return report
+        } catch {
+            return ObservationClearReport(
+                oldGeneration: report.oldGeneration,
+                newGeneration: report.newGeneration,
+                failures: report.failures + [.acceptance]
+            )
+        }
+    }
 }
 
 public final class InProcessObservationLock: ObservationLocking, @unchecked Sendable {
@@ -561,6 +585,13 @@ public final class ObservationStore: @unchecked Sendable {
     public func clearObservationData(
         inMemoryReset: () throws -> Void
     ) throws -> ObservationClearReport {
+        try clearObservationData(persistentReset: {}, inMemoryReset: inMemoryReset)
+    }
+
+    public func clearObservationData(
+        persistentReset: () throws -> Void,
+        inMemoryReset: () throws -> Void
+    ) throws -> ObservationClearReport {
         try mapPersistenceErrors {
             try lock.withExclusiveLock {
                 let oldGeneration = try readGenerationWithoutLock()
@@ -588,6 +619,11 @@ public final class ObservationStore: @unchecked Sendable {
                     category: .pendingDelivery,
                     failures: &failures
                 )
+                do {
+                    try persistentReset()
+                } catch {
+                    failures.append(.acceptance)
+                }
                 do {
                     try inMemoryReset()
                 } catch {

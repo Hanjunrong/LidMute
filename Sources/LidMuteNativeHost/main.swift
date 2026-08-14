@@ -43,11 +43,13 @@ do {
     let session = NativeHostSession(
         acceptor: store,
         onAccepted: { _ in
-            try? acceptanceStore.write(.init(
+            let generation = try store.currentGeneration()
+            try acceptanceStore.write(.init(
                 version: ChromeHostAcceptance.schemaVersion,
                 sessionToken: sessionToken,
                 pid: processID,
-                uptime: ProcessInfo.processInfo.systemUptime
+                uptime: ProcessInfo.processInfo.systemUptime,
+                generation: generation
             ))
         }
     )
@@ -55,7 +57,7 @@ do {
     while true {
         let chunk = FileHandle.standardInput.availableData
         guard !chunk.isEmpty else { break }
-        for acknowledgement in try session.receive(chunk) {
+        for acknowledgement in try store.withExclusiveLock({ try session.receive(chunk) }) {
             try writeNativeMessage(acknowledgement)
         }
     }

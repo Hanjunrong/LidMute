@@ -82,6 +82,38 @@ private enum ChromeDiagnosticState: Equatable {
     case degraded
 }
 
+struct ChromeHealthIOResult: Sendable {
+    let manifest: ChromeManifestInspection
+    let heartbeat: HeartbeatFreshness
+    let acceptance: HeartbeatFreshness
+}
+
+protocol AppHealthIOCollecting: Sendable {
+    func collect(nowUptime: TimeInterval, expectedHostPath: URL) -> ChromeHealthIOResult
+}
+
+private struct DefaultAppHealthIOCollector: AppHealthIOCollecting {
+    let heartbeatStore: any ChromeHostHeartbeatPersisting
+    let acceptanceStore: any ChromeHostAcceptancePersisting
+    let chromeRegistration: any ChromeManifestInspecting
+
+    func collect(nowUptime: TimeInterval, expectedHostPath: URL) -> ChromeHealthIOResult {
+        let manifest = chromeRegistration.inspect(expectedHostPath: expectedHostPath)
+        guard manifest == .current else {
+            return ChromeHealthIOResult(
+                manifest: manifest,
+                heartbeat: .stale,
+                acceptance: .stale
+            )
+        }
+        return ChromeHealthIOResult(
+            manifest: manifest,
+            heartbeat: heartbeatStore.readFreshness(nowUptime: nowUptime, ttl: 6),
+            acceptance: acceptanceStore.readFreshness(nowUptime: nowUptime, ttl: 30)
+        )
+    }
+}
+
 @MainActor
 protocol LifecycleStateProviding: AnyObject {
     var state: AppLifecycleState { get }
@@ -108,7 +140,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published var isLightweightModeEnabled = false
     @Published private(set) var statusText = "守卫未开启"
     @Published private(set) var events: [LidMuteEvent] = []
-    @Published private(set) var chromeBridgeStatus = "等待 Chrome 扩展连接"
     @Published private(set) var simulatedLidState: SimulatedLidState = .opened
     @Published private(set) var currentAudioProcesses: [AudioProcess] = []
     @Published private(set) var currentAudioSources: [AudioSourcePresentation] = []
@@ -119,7 +150,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published private(set) var isNightProtectionActive = false
     @Published private(set) var nightScheduleStatus = "夜间静音未开启"
     @Published private(set) var mediaStatus = "系统媒体控制就绪"
-    @Published private(set) var chromeConnectionState: ChromeConnectionState = .unknown
     @Published var chromeExtensionId = ""
     @Published private(set) var chromeRegistrationStatus = ""
     @Published private(set) var chromeExtensionPath = ""
@@ -134,7 +164,34 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         storage: .healthy,
         recovery: .healthy
     )
-    @Published private(set) var canRepairChromeManifest = false
+    var chromeConnectionState: ChromeConnectionState {
+        switch health.chrome {
+        case .notRegistered, .manifestPathMismatch:
+            return .notRegistered
+        case .waitingForConnection, .degraded:
+            return .waitingForExtension
+        case .connected:
+            return .connected
+        case .recentlyAccepted:
+            return .receivedEvent
+        }
+    }
+
+    var chromeBridgeStatus: String {
+        switch health.chrome {
+        case .notRegistered: return "未注册 Chrome 通信主机"
+        case .waitingForConnection: return "等待 Chrome 扩展连接"
+        case .connected: return "Chrome 已连接"
+        case .recentlyAccepted: return "最近收到 Chrome 事件"
+        case .manifestPathMismatch: return "Chrome 通信路径需要修复"
+        case .degraded: return "Chrome 通信异常"
+        }
+    }
+
+    var canRepairChromeManifest: Bool {
+        if case .manifestPathMismatch = health.chrome { return true }
+        return false
+    }
 
     var canToggleGuard: Bool { lifecycleState == .ready }
 
@@ -160,6 +217,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private let audioPoller: any AudioProcessPolling
     private let uptime: @Sendable () -> TimeInterval
     private let expectedChromeHostPath: URL
+    private let healthIOCollector: any AppHealthIOCollecting
     private var audioTimer: Timer?
     private var inboxTimer: Timer?
     private var nightTimer: Timer?
@@ -189,6 +247,8 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var consumeTypedHealth: ObservationStorageHealth = .healthy
     private var ackTypedHealth: ObservationStorageHealth = .healthy
     private var clearTypedHealth: ObservationStorageHealth = .healthy
+    private var healthRefreshGeneration: UInt64 = 0
+    private var healthRefreshTask: Task<Void, Never>?
 
     init(
         applicationSupport: URL? = nil,
@@ -204,7 +264,8 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         diagnosticSink: (any LidMuteDiagnosticSinking)? = nil,
         audioPoller: (any AudioProcessPolling)? = nil,
         uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-        expectedChromeHostPath: URL? = nil
+        expectedChromeHostPath: URL? = nil,
+        healthIOCollector: (any AppHealthIOCollecting)? = nil
     ) {
         let support = applicationSupport ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -215,19 +276,27 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         self.chromeManifestURL = resolvedManifestURL
         let originURL = support.appending(path: "chrome-origin.txt")
         let heartbeatURL = support.appending(path: "chrome-host-heartbeat.json")
-        self.heartbeatStore = heartbeatStore ?? FileChromeHostHeartbeatStore(url: heartbeatURL)
-        self.acceptanceStore = acceptanceStore ?? FileChromeHostAcceptanceStore(
+        let resolvedHeartbeatStore = heartbeatStore ?? FileChromeHostHeartbeatStore(url: heartbeatURL)
+        let resolvedAcceptanceStore = acceptanceStore ?? FileChromeHostAcceptanceStore(
             url: support.appending(path: "chrome-host-acceptance.json"),
             heartbeatURL: heartbeatURL
         )
-        self.chromeRegistration = chromeRegistration ?? ChromeHostRegistration(
+        let resolvedChromeRegistration = chromeRegistration ?? ChromeHostRegistration(
             manifestURL: resolvedManifestURL,
             originURL: originURL
         )
+        self.heartbeatStore = resolvedHeartbeatStore
+        self.acceptanceStore = resolvedAcceptanceStore
+        self.chromeRegistration = resolvedChromeRegistration
         self.diagnosticSink = diagnosticSink ?? LoggerDiagnosticSink()
         self.uptime = uptime
         self.expectedChromeHostPath = expectedChromeHostPath ?? Bundle.main.bundleURL
             .appending(path: "Contents/MacOS/LidMuteNativeHost")
+        self.healthIOCollector = healthIOCollector ?? DefaultAppHealthIOCollector(
+            heartbeatStore: resolvedHeartbeatStore,
+            acceptanceStore: resolvedAcceptanceStore,
+            chromeRegistration: resolvedChromeRegistration as any ChromeManifestInspecting
+        )
 
         let paths = ObservationPaths(root: support)
         let fileSystem = POSIXObservationFileSystem()
@@ -507,10 +576,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         guard !isClearingObservationData else { return }
         isClearingObservationData = true
         observationEpoch &+= 1
+        healthRefreshGeneration &+= 1
         inboxTimer?.invalidate()
         inboxTimer = nil
         defer {
             isClearingObservationData = false
+            refreshHealth()
             startChromeObservationTimerIfReady()
         }
 
@@ -523,8 +594,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
         do {
             let observationStore = observationStore
+            let acceptanceStore = acceptanceStore
             let report = try await Task.detached(priority: .utility) {
-                try observationStore.clearObservationData(inMemoryReset: {})
+                try observationStore.clearObservationData(
+                    persistentReset: { try acceptanceStore.remove() },
+                    inMemoryReset: {}
+                )
             }.value
             clearReport = report
             applyObservationClearReport(report)
@@ -560,12 +635,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             let batch = try await Task.detached(priority: .utility) {
                 try consumer.consumeAvailable()
             }.value
-            chromeBridgeIsDegraded = false
-            setOperationalStorageHealth(batch.health, source: .consume)
             guard lifecycleStateProvider.state == .ready,
                   !isShuttingDown,
                   !isClearingObservationData,
                   observationEpoch == pollEpoch else { return }
+            chromeBridgeIsDegraded = false
+            setOperationalStorageHealth(batch.health, source: .consume)
             guard !batch.records.isEmpty else {
                 checkChromeConnection()
                 return
@@ -598,8 +673,14 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                         try await Task.detached(priority: .utility) {
                             try consumer.acknowledgeDelivery(deliveryID)
                         }.value
+                        guard !model.isShuttingDown,
+                              !model.isClearingObservationData,
+                              model.observationEpoch == pollEpoch else { return }
                         model.setOperationalStorageHealth(.healthy, source: .acknowledgement)
                     } catch {
+                        guard !model.isShuttingDown,
+                              !model.isClearingObservationData,
+                              model.observationEpoch == pollEpoch else { return }
                         model.setOperationalStorageFailure(error, source: .acknowledgement)
                     }
                 }
@@ -610,10 +691,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                   !isShuttingDown,
                   !isClearingObservationData,
                   observationEpoch == pollEpoch else { return }
-            chromeConnectionState = .receivedEvent
-            chromeBridgeStatus = "已接收 Chrome 标签页事件"
             rebuildCurrentAudioSources()
         } catch {
+            guard lifecycleStateProvider.state == .ready,
+                  !isShuttingDown,
+                  !isClearingObservationData,
+                  observationEpoch == pollEpoch else { return }
             receiveChromeBridgeDegraded()
             setOperationalStorageFailure(error, source: .consume)
         }
@@ -684,13 +767,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
         if !report.failures.contains(.inbox) {
             latestChromeEvidence = nil
-            try? acceptanceStore.remove()
             currentAudioSources = AudioSourcePresentation.current(
                 processes: currentAudioProcesses,
                 chromeTab: nil
             )
-            chromeConnectionState = .waitingForExtension
-            chromeBridgeStatus = "等待 Chrome 扩展连接"
         }
         if !report.failures.contains(.cursor),
            !report.failures.contains(.pendingDelivery) {
@@ -767,26 +847,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     func checkChromeConnection() {
         refreshHealth()
-        switch health.chrome {
-        case .notRegistered:
-            chromeConnectionState = .notRegistered
-            chromeBridgeStatus = "未注册 Chrome 通信主机"
-        case .waitingForConnection:
-            chromeConnectionState = .waitingForExtension
-            chromeBridgeStatus = "等待 Chrome 扩展连接"
-        case .connected:
-            chromeConnectionState = .connected
-            chromeBridgeStatus = "Chrome 已连接"
-        case .recentlyAccepted:
-            chromeConnectionState = .receivedEvent
-            chromeBridgeStatus = "最近收到 Chrome 事件"
-        case .manifestPathMismatch:
-            chromeConnectionState = .notRegistered
-            chromeBridgeStatus = "Chrome 通信路径需要修复"
-        case .degraded:
-            chromeConnectionState = .waitingForExtension
-            chromeBridgeStatus = "Chrome 通信异常"
-        }
 
         // Pre-fill extension ID if registered
         if chromeExtensionId.isEmpty, let registeredId = registeredExtensionId {
@@ -795,6 +855,22 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     func refreshHealth() {
+        refreshLocalHealth()
+        healthRefreshGeneration &+= 1
+        let generation = healthRefreshGeneration
+        let collector = healthIOCollector
+        let nowUptime = uptime()
+        let expectedHostPath = expectedChromeHostPath
+        healthRefreshTask = Task { @MainActor [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                collector.collect(nowUptime: nowUptime, expectedHostPath: expectedHostPath)
+            }.value
+            guard let self, self.healthRefreshGeneration == generation else { return }
+            self.applyChromeHealthResult(result)
+        }
+    }
+
+    private func refreshLocalHealth() {
         switch lastLidMonitorResult {
         case .state:
             updateHealth(lidMonitor: .healthy)
@@ -813,43 +889,42 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             break
         }
 
+    }
+
+    func waitForHealthRefresh() async {
+        await healthRefreshTask?.value
+    }
+
+    private func applyChromeHealthResult(_ result: ChromeHealthIOResult) {
         let nextChromeHealth: ChromeBridgeHealth
         let nextDiagnosticState: ChromeDiagnosticState
-        switch chromeRegistration.inspect(expectedHostPath: expectedChromeHostPath) {
+        switch result.manifest {
         case .notRegistered:
-            canRepairChromeManifest = false
             nextChromeHealth = .notRegistered
             nextDiagnosticState = .none
         case let .pathMismatch(expected, registered):
-            canRepairChromeManifest = true
             nextChromeHealth = .manifestPathMismatch(expected: expected, registered: registered)
             nextDiagnosticState = .manifestMismatch
         case .malformed:
-            canRepairChromeManifest = false
             nextChromeHealth = .degraded
             nextDiagnosticState = .degraded
         case .current:
-            canRepairChromeManifest = false
             if chromeBridgeIsDegraded {
                 nextChromeHealth = .degraded
                 nextDiagnosticState = .degraded
             } else {
-                let nowUptime = uptime()
-                switch heartbeatStore.readFreshness(nowUptime: nowUptime, ttl: 6) {
+                switch result.heartbeat {
                 case let .fresh(sessionToken, pid):
-                    if acceptanceStore.readFreshness(nowUptime: nowUptime, ttl: 30) ==
+                    if result.acceptance ==
                         .fresh(sessionToken: sessionToken, pid: pid) {
                         nextChromeHealth = .recentlyAccepted(sessionToken: sessionToken, pid: pid)
                     } else {
                         nextChromeHealth = .connected(sessionToken: sessionToken, pid: pid)
                     }
                     nextDiagnosticState = .none
-                case .stale:
+                case .stale, .malformed:
                     nextChromeHealth = .waitingForConnection
                     nextDiagnosticState = .staleHeartbeat
-                case .malformed:
-                    nextChromeHealth = .degraded
-                    nextDiagnosticState = .degraded
                 }
             }
         }
@@ -949,7 +1024,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     private func refresh() {
-        defer { refreshHealth() }
+        refreshLocalHealth()
         switch lifecycleState {
         case .recovering:
             statusText = "正在恢复内建扬声器安全状态"
