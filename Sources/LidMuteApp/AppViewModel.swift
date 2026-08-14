@@ -15,6 +15,18 @@ enum ChromeConnectionState: Equatable {
     case receivedEvent
 }
 
+enum StorageStatusSeverity: Int, Equatable {
+    case none
+    case warning
+    case error
+}
+
+private enum OperationalStorageHealth: Equatable {
+    case healthy
+    case warning(String)
+    case failure(String)
+}
+
 @MainActor
 protocol LifecycleStateProviding: AnyObject {
     var state: AppLifecycleState { get }
@@ -25,12 +37,12 @@ extension ApplicationLifecycleCoordinator: LifecycleStateProviding {}
 
 @MainActor
 protocol ObservationPipelineCoordinating: AnyObject {
-    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async -> SpeakerRecoveryOutcome
+    func ensureProtected(for evidence: ChromeTabEvidence) async -> ChromeSafetyDeliveryResult
     func receivePhysicalLid(closed: Bool) async
     func receiveAudioRouteChanged() async
     func flushObservationLogging() async
     func beginObservationClear() async -> ObservationClearBoundary
-    func endObservationClear(_ boundary: ObservationClearBoundary)
+    func endObservationClear(_ boundary: ObservationClearBoundary, report: ObservationClearReport?)
 }
 
 extension ProtectionCoordinator: ObservationPipelineCoordinating {}
@@ -58,6 +70,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published private(set) var chromeExtensionPath = ""
     @Published private(set) var lifecycleState: AppLifecycleState = .recovering
     @Published private(set) var storageStatusText = ""
+    @Published private(set) var storageStatusSeverity: StorageStatusSeverity = .none
     @Published private(set) var isClearingObservationData = false
 
     var canToggleGuard: Bool { lifecycleState == .ready }
@@ -95,7 +108,8 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var routeChangePending = false
     private var isChromeInboxPollInFlight = false
     private var observationEpoch: UInt64 = 0
-    private var storageStatusIsCoordinatorOwned = false
+    private var coordinatorStorageHealth: ObservationStorageHealth = .healthy
+    private var operationalStorageHealth: OperationalStorageHealth = .healthy
 
     init(
         applicationSupport: URL? = nil,
@@ -385,20 +399,25 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         await queuedProtectionWork?.value
         await queuedRouteWork?.value
         let clearBoundary = await observationPipelineCoordinator.beginObservationClear()
+        var clearReport: ObservationClearReport?
 
         do {
             let observationStore = observationStore
             let report = try await Task.detached(priority: .utility) {
                 try observationStore.clearObservationData(inMemoryReset: {})
             }.value
+            clearReport = report
             applyObservationClearReport(report)
-            setOperationalStorageStatus(report.isComplete
-                ? ""
-                : "部分数据未清空：\(report.failures.map(\.rawValue).joined(separator: "、"))")
+            setOperationalStorageStatus(
+                report.isComplete
+                    ? ""
+                    : "部分数据未清空：\(report.failures.map(\.rawValue).joined(separator: "、"))",
+                severity: .warning
+            )
         } catch {
             setOperationalStorageStatus(Self.storageFailureText(error))
         }
-        observationPipelineCoordinator.endObservationClear(clearBoundary)
+        observationPipelineCoordinator.endObservationClear(clearBoundary, report: clearReport)
     }
 
     func pollChromeInbox() async {
@@ -428,7 +447,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 latestChromeEvidence = record.evidence
                 receiveCoordinatorEvent(Self.timelineEvent(for: record))
             }
-            enqueueProtectionEvent { model in
+            let deliveryTask = enqueueProtectionEvent { model in
                 guard !model.isShuttingDown,
                       !model.isClearingObservationData,
                       model.observationEpoch == pollEpoch else { return }
@@ -441,9 +460,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                         break
                     }
                     let outcome = await model.observationPipelineCoordinator
-                        .receiveChromeEvidence(record.evidence)
+                        .ensureProtected(for: record.evidence)
                     deliveryIsSafeToAcknowledge = deliveryIsSafeToAcknowledge &&
-                        outcome.observationDeliveryIsSafeToAcknowledge
+                        outcome.deliveryIsSafeToAcknowledge
                 }
                 if deliveryIsSafeToAcknowledge, let deliveryID = batch.deliveryID {
                     let consumer = model.inboxConsumer
@@ -457,6 +476,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 }
                 model.refresh()
             }
+            await deliveryTask.value
             lastChromeEventAt = Date()
             chromeConnectionState = .receivedEvent
             chromeBridgeStatus = "已接收 Chrome 标签页事件"
@@ -467,15 +487,8 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     func receiveCoordinatorStorageHealth(_ health: ObservationStorageHealth) {
-        if health == .healthy {
-            if storageStatusIsCoordinatorOwned {
-                storageStatusText = ""
-                storageStatusIsCoordinatorOwned = false
-            }
-            return
-        }
-        storageStatusText = Self.storageHealthText(health)
-        storageStatusIsCoordinatorOwned = true
+        coordinatorStorageHealth = health
+        publishStorageStatusPresentation()
     }
 
     func receiveCoordinatorEvent(_ event: LidMuteEvent) {
@@ -760,9 +773,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
     }
 
+    @discardableResult
     private func enqueueProtectionEvent(
         _ operation: @escaping @MainActor (AppViewModel) async -> Void
-    ) {
+    ) -> Task<Void, Never> {
         let predecessor = protectionEventTask
         let task = Task { @MainActor [weak self] in
             await predecessor?.value
@@ -770,6 +784,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             await operation(self)
         }
         protectionEventTask = task
+        return task
     }
 
     private func recoveryBlockedStatus(_ outcome: SpeakerRecoveryOutcome) -> String {
@@ -815,9 +830,48 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
     }
 
-    private func setOperationalStorageStatus(_ text: String) {
-        storageStatusText = text
-        storageStatusIsCoordinatorOwned = false
+    private func setOperationalStorageStatus(
+        _ text: String,
+        severity: StorageStatusSeverity = .error
+    ) {
+        if text.isEmpty {
+            operationalStorageHealth = .healthy
+        } else if severity == .warning {
+            operationalStorageHealth = .warning(text)
+        } else {
+            operationalStorageHealth = .failure(text)
+        }
+        publishStorageStatusPresentation()
+    }
+
+    private func publishStorageStatusPresentation() {
+        var messages: [String] = []
+        if coordinatorStorageHealth != .healthy {
+            messages.append(Self.storageHealthText(coordinatorStorageHealth))
+        }
+
+        let operationalSeverity: StorageStatusSeverity
+        switch operationalStorageHealth {
+        case .healthy:
+            operationalSeverity = .none
+        case let .warning(text):
+            messages.append(text)
+            operationalSeverity = .warning
+        case let .failure(text):
+            messages.append(text)
+            operationalSeverity = .error
+        }
+
+        storageStatusText = messages.reduce(into: [String]()) { uniqueMessages, message in
+            if !uniqueMessages.contains(message) {
+                uniqueMessages.append(message)
+            }
+        }.joined(separator: "\n")
+        if coordinatorStorageHealth != .healthy || operationalSeverity == .error {
+            storageStatusSeverity = .error
+        } else {
+            storageStatusSeverity = operationalSeverity
+        }
     }
 
     private static func storageHealthText(_ health: ObservationStorageHealth) -> String {

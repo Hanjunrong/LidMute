@@ -566,7 +566,11 @@ private struct ActivityTimeline: View {
             if !model.storageStatusText.isEmpty {
                 Text(model.storageStatusText)
                     .font(ControlCenterTypography.caption)
-                    .foregroundStyle(AmberVisualTheme.danger)
+                    .foregroundStyle(
+                        model.storageStatusSeverity == .warning
+                            ? AmberVisualTheme.amber
+                            : AmberVisualTheme.danger
+                    )
             }
 
             Group {

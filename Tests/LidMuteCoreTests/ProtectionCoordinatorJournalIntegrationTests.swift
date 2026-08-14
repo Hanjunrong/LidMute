@@ -61,6 +61,32 @@ private actor PausingRouteProtectionApplying: SpeakerProtectionApplying {
     }
 }
 
+private actor UnavailableThenMatchingChromeProtectionApplying: SpeakerProtectionApplying {
+    private var actions: [SpeakerProtectionAction] = []
+    private var routeOutcomes: [SpeakerRecoveryOutcome] = [
+        .waitingForMatchingDevice,
+        .noPendingRecovery,
+    ]
+
+    func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
+        actions.append(action)
+        switch action {
+        case .begin:
+            return .waitingForMatchingDevice
+        case .routeChangedWhileProtectionRequired:
+            return routeOutcomes.removeFirst()
+        case .reinforce:
+            return .failedSafetyUnknown
+        case .end:
+            return .restored
+        }
+    }
+
+    func appliedActions() -> [SpeakerProtectionAction] {
+        actions
+    }
+}
+
 private final class PausingPipelineEventStore: EventStoring, @unchecked Sendable {
     private let condition = NSCondition()
     private var events: [LidMuteEvent] = []
@@ -180,6 +206,36 @@ private final class RecoveringHealthEventStore: EventStoring, @unchecked Sendabl
 
 @MainActor
 final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
+    func testChromeSafetyDeliveryRetriesUnavailableActiveProtectionUntilMatchingRouteIsProtected() async {
+        let protection = UnavailableThenMatchingChromeProtectionApplying()
+        let coordinator = ProtectionCoordinator(
+            protection: protection,
+            processEvidence: ScriptedAudioController(),
+            store: MemoryEventStore()
+        )
+        await coordinator.setEnabled(true)
+        await coordinator.receivePhysicalLid(closed: true)
+        XCTAssertEqual(coordinator.state, .unavailable)
+
+        let evidence = ChromeTabEvidence.fixture(audible: true, incognito: false)
+        let firstDelivery = await coordinator.ensureProtected(for: evidence)
+        XCTAssertEqual(firstDelivery, .unsafe)
+        XCTAssertEqual(coordinator.state, .unavailable)
+
+        let secondDelivery = await coordinator.ensureProtected(for: evidence)
+        XCTAssertEqual(secondDelivery, .protected)
+        XCTAssertEqual(coordinator.state, .protecting)
+        let appliedActions = await protection.appliedActions()
+        XCTAssertEqual(
+            appliedActions,
+            [
+                .begin(sources: [.physicalLid]),
+                .routeChangedWhileProtectionRequired(sources: [.physicalLid]),
+                .routeChangedWhileProtectionRequired(sources: [.physicalLid]),
+            ]
+        )
+    }
+
     func testDetachedObservationLoggingReportsTypedHealthAndRecoversWithoutBlockingSafety() async {
         let cases: [(EventStoreError, ObservationStorageHealth)] = [
             (.permissionFailure, .permissionFailure),
@@ -227,13 +283,68 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         await coordinator.receivePhysicalLid(closed: false)
         XCTAssertTrue(try store.load().isEmpty)
 
-        coordinator.endObservationClear(boundary)
+        coordinator.endObservationClear(
+            boundary,
+            report: ObservationClearReport(oldGeneration: 0, newGeneration: 1, failures: [])
+        )
         await coordinator.flushObservationLogging()
 
         XCTAssertEqual(
             try store.load().map(\.kind),
             [.muteEnforced, .lidOpened, .restored]
         )
+    }
+
+    func testSuccessfulInboxClearRemovesCoordinatorChromeEvidenceWithoutEndingProtection() async {
+        let timeline = SharedOperationTimeline()
+        let coordinator = ProtectionCoordinator(
+            protection: TimelineProtectionApplying(timeline: timeline),
+            processEvidence: ScriptedAudioController(),
+            store: MemoryEventStore()
+        )
+        await coordinator.setEnabled(true)
+        await coordinator.receivePhysicalLid(closed: true)
+        let evidence = ChromeTabEvidence.fixture(audible: true, incognito: false)
+        await coordinator.receiveChromeEvidence(evidence)
+        XCTAssertEqual(coordinator.latestChromeEvidence?.title, "Example")
+        XCTAssertEqual(coordinator.latestChromeEvidence?.url, "https://example.com/watch?q=1#now")
+
+        let boundary = await coordinator.beginObservationClear()
+        coordinator.endObservationClear(
+            boundary,
+            report: ObservationClearReport(oldGeneration: 0, newGeneration: 1, failures: [])
+        )
+
+        XCTAssertNil(coordinator.latestChromeEvidence)
+        XCTAssertEqual(coordinator.state, .protecting)
+        await coordinator.receiveAudioRouteChanged()
+        XCTAssertTrue(timeline.snapshot().contains("protection.routeChanged"))
+    }
+
+    func testFailedInboxClearRetainsCoordinatorChromeEvidence() async {
+        let coordinator = ProtectionCoordinator(
+            protection: TimelineProtectionApplying(timeline: SharedOperationTimeline()),
+            processEvidence: ScriptedAudioController(),
+            store: MemoryEventStore()
+        )
+        await coordinator.setEnabled(true)
+        await coordinator.receivePhysicalLid(closed: true)
+        let evidence = ChromeTabEvidence.fixture(audible: true, incognito: false)
+        await coordinator.receiveChromeEvidence(evidence)
+
+        let boundary = await coordinator.beginObservationClear()
+        coordinator.endObservationClear(
+            boundary,
+            report: ObservationClearReport(
+                oldGeneration: 0,
+                newGeneration: 1,
+                failures: [.inbox]
+            )
+        )
+
+        XCTAssertEqual(coordinator.latestChromeEvidence?.title, "Example")
+        XCTAssertEqual(coordinator.latestChromeEvidence?.url, "https://example.com/watch?q=1#now")
+        XCTAssertEqual(coordinator.state, .protecting)
     }
 
     func testObservationFlushWaitsForInFlightTransitionAndItsLoggingTail() async throws {

@@ -76,7 +76,21 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
 
     @discardableResult
     public func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async -> SpeakerRecoveryOutcome {
-        await enqueue(.chromeEvidence(evidence))
+        await enqueue(.chromeEvidence(evidence)).outcome
+    }
+
+    public func ensureProtected(for evidence: ChromeTabEvidence) async -> ChromeSafetyDeliveryResult {
+        let result = await enqueue(.chromeSafetyEvidence(evidence))
+        guard result.chromeProtectionWasRequired else { return .notRequired }
+        guard result.actionWasApplied else { return .unsafe }
+        switch (result.outcome, result.resultingState) {
+        case (.noPendingRecovery, .protecting):
+            return .protected
+        case (.failedButVerifiedSilent, .protecting):
+            return .verifiedSilent
+        default:
+            return .unsafe
+        }
     }
 
     public func receiveAudioRouteChanged() async {
@@ -84,7 +98,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     }
 
     public func endProtectionForShutdown() async -> SpeakerRecoveryOutcome {
-        await enqueue(.shutdown)
+        await enqueue(.shutdown).outcome
     }
 
     public func flushObservationLogging() async {
@@ -115,7 +129,18 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         return boundary
     }
 
-    public func endObservationClear(_ boundary: ObservationClearBoundary) {
+    public func endObservationClear(
+        _ boundary: ObservationClearBoundary,
+        report: ObservationClearReport?
+    ) {
+        guard activeObservationClearBoundary == boundary else { return }
+        if let report, !report.failures.contains(.inbox) {
+            latestChromeEvidence = nil
+        }
+        finishObservationClear(boundary)
+    }
+
+    private func finishObservationClear(_ boundary: ObservationClearBoundary) {
         guard activeObservationClearBoundary == boundary else { return }
         let events = deferredObservationEvents
         deferredObservationEvents.removeAll(keepingCapacity: true)
@@ -123,14 +148,14 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         enqueueObservationEvents(events)
     }
 
-    private func enqueue(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {
+    private func enqueue(_ input: ProtectionCoordinatorInput) async -> ProtectionProcessingResult {
         let predecessor = transitionTask
         let inputObservationGeneration = observationGeneration
         transitionSequence += 1
         let sequence = transitionSequence
         let task = Task { @MainActor [weak self] in
             await predecessor?.value
-            guard let self else { return SpeakerRecoveryOutcome.failedSafetyUnknown }
+            guard let self else { return ProtectionProcessingResult.unavailable }
             return await self.process(input, observationGeneration: inputObservationGeneration)
         }
         transitionTask = Task { _ = await task.value }
@@ -142,16 +167,32 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     private func process(
         _ input: ProtectionCoordinatorInput,
         observationGeneration: UInt64
-    ) async -> SpeakerRecoveryOutcome {
+    ) async -> ProtectionProcessingResult {
+        let chromeProtectionWasRequired = switch input {
+        case .chromeSafetyEvidence:
+            isEnabled && !activeSources.isEmpty
+        default:
+            false
+        }
         bufferedObservationEvents = []
         guard let prepared = prepare(input) else {
             enqueueBufferedObservationEvents(generation: observationGeneration)
-            return .noPendingRecovery
+            return ProtectionProcessingResult(
+                outcome: .noPendingRecovery,
+                actionWasApplied: false,
+                chromeProtectionWasRequired: chromeProtectionWasRequired,
+                resultingState: state
+            )
         }
         let outcome = await protection.apply(prepared.action)
         complete(prepared.completion, outcome: outcome)
         enqueueBufferedObservationEvents(generation: observationGeneration)
-        return outcome
+        return ProtectionProcessingResult(
+            outcome: outcome,
+            actionWasApplied: true,
+            chromeProtectionWasRequired: chromeProtectionWasRequired,
+            resultingState: state
+        )
     }
 
     private func prepare(_ input: ProtectionCoordinatorInput) -> PreparedProtectionAction? {
@@ -177,7 +218,9 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         case let .audioSnapshot(processes):
             return prepareAudioSnapshot(processes)
         case let .chromeEvidence(evidence):
-            return prepareChromeEvidence(evidence)
+            return prepareChromeEvidence(evidence, ensuringProtection: false)
+        case let .chromeSafetyEvidence(evidence):
+            return prepareChromeEvidence(evidence, ensuringProtection: true)
         case .audioRouteChanged:
             guard isEnabled, !activeSources.isEmpty else { return nil }
             return PreparedProtectionAction(
@@ -284,7 +327,10 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         )
     }
 
-    private func prepareChromeEvidence(_ evidence: ChromeTabEvidence) -> PreparedProtectionAction? {
+    private func prepareChromeEvidence(
+        _ evidence: ChromeTabEvidence,
+        ensuringProtection: Bool
+    ) -> PreparedProtectionAction? {
         guard isEnabled else { return nil }
         latestChromeEvidence = evidence
         let chromeProcess: AudioProcess?
@@ -300,9 +346,16 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
             record(.error, "无法读取系统音频进程：\(error.localizedDescription)")
         }
         let correlation: CorrelationStatus = chromeProcess == nil ? .browserObservedOnly : .systemMatched
-        guard state == .protecting else { return nil }
+        let action: SpeakerProtectionAction
+        if ensuringProtection {
+            guard !activeSources.isEmpty else { return nil }
+            action = .routeChangedWhileProtectionRequired(sources: activeSources)
+        } else {
+            guard state == .protecting else { return nil }
+            action = .reinforce
+        }
         return PreparedProtectionAction(
-            action: .reinforce,
+            action: action,
             completion: .reinforcement(
                 successDetail: "Chrome 标签页发声，已强制静音内建扬声器",
                 chromeTab: evidence,
@@ -500,8 +553,23 @@ private enum ProtectionCoordinatorInput: Sendable {
     case night(Bool)
     case audioSnapshot([AudioProcess])
     case chromeEvidence(ChromeTabEvidence)
+    case chromeSafetyEvidence(ChromeTabEvidence)
     case audioRouteChanged
     case shutdown
+}
+
+private struct ProtectionProcessingResult {
+    let outcome: SpeakerRecoveryOutcome
+    let actionWasApplied: Bool
+    let chromeProtectionWasRequired: Bool
+    let resultingState: ProtectionState
+
+    static let unavailable = ProtectionProcessingResult(
+        outcome: .failedSafetyUnknown,
+        actionWasApplied: false,
+        chromeProtectionWasRequired: true,
+        resultingState: .unavailable
+    )
 }
 
 private struct PreparedProtectionAction {

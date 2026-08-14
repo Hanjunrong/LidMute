@@ -16,6 +16,17 @@ function deferred() {
   return { promise, resolve };
 }
 
+function listenerHarness() {
+  let listener;
+  return {
+    api: { addListener(value) { listener = value; } },
+    emit(...arguments_) {
+      assert.ok(listener, 'expected listener to be registered');
+      return listener(...arguments_);
+    }
+  };
+}
+
 function storageWith(outbox, getGate) {
   let value = { sessionId: crypto.randomUUID(), seq: outbox.length, outbox };
   return {
@@ -104,6 +115,58 @@ test('removes only terminal dispositions and keeps retryable failure', async () 
   assert.equal(storage.snapshot().outbox.length, 1);
 });
 
+test('terminal ack preserves durable retry while a retryable event remains', async () => {
+  const outboxStorage = storageWith([{ eventId: 'retryable' }, { eventId: 'terminal' }]);
+  const retryStorage = keyValueStorage();
+  const alarms = alarmHarness();
+  const scheduler = createRetryScheduler(
+    retryStorage.area,
+    alarms.api,
+    async () => {},
+    () => 10_000
+  );
+  const scheduledOutboxes = [];
+  let succeedCount = 0;
+  const controller = createOutboxController(
+    outboxStorage.session,
+    () => {},
+    async () => {
+      scheduledOutboxes.push(outboxStorage.snapshot().outbox.map((event) => event.eventId));
+      await scheduler.schedule();
+    },
+    async () => {
+      succeedCount += 1;
+      await scheduler.succeed();
+    }
+  );
+
+  const retryable = controller.acknowledge({
+    type: 'ack', eventId: 'retryable', disposition: 'retryable_failure'
+  });
+  const terminal = controller.acknowledge({
+    type: 'ack', eventId: 'terminal', disposition: 'accepted'
+  });
+  await Promise.all([retryable, terminal]);
+
+  assert.deepEqual(outboxStorage.snapshot().outbox, [{ eventId: 'retryable' }]);
+  assert.deepEqual(scheduledOutboxes, [
+    ['retryable', 'terminal'],
+    ['retryable']
+  ]);
+  assert.equal(succeedCount, 0);
+  assert.equal(retryStorage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 11_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 11_000);
+
+  await controller.acknowledge({
+    type: 'ack', eventId: 'retryable', disposition: 'accepted'
+  });
+  assert.deepEqual(outboxStorage.snapshot().outbox, []);
+  assert.equal(scheduledOutboxes.length, 2);
+  assert.equal(succeedCount, 1);
+  assert.equal(retryStorage.snapshot()[RETRY_STATE_KEY], undefined);
+  assert.equal(alarms.get(RETRY_ALARM_NAME), undefined);
+});
+
 test('enqueue concurrent with ack preserves the new item', async () => {
   const storage = storageWith([{ eventId: 'old' }]);
   const controller = createOutboxController(storage.session, () => {}, () => {});
@@ -168,6 +231,94 @@ test('retry persists its deadline and rebuilds a lost alarm after worker restart
 
   assert.equal(alarms.get(RETRY_ALARM_NAME).when, 11_000);
   assert.deepEqual(storage.snapshot()[RETRY_STATE_KEY], persisted);
+});
+
+test('fire-and-forget restore failure is caught and startup recreates its durable alarm', async (t) => {
+  const sessionStorage = storageWith([{ eventId: 'retained' }]);
+  const retryDeadline = 4_102_444_800_000; // 2100-01-01T00:00:00Z
+  const retryStorage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: retryDeadline,
+      nextDelayMilliseconds: 2_000
+    }
+  });
+  const failedCreate = deferred();
+  const recreated = deferred();
+  const startupCompleted = deferred();
+  const alarms = new Map();
+  let createCount = 0;
+  const portDisconnect = listenerHarness();
+  const portMessage = listenerHarness();
+  const alarmEvent = listenerHarness();
+  const tabUpdated = listenerHarness();
+  const runtimeStartup = listenerHarness();
+  const runtimeInstalled = listenerHarness();
+  const unhandled = [];
+  const recordUnhandled = (error) => unhandled.push(error);
+  const hadChrome = Object.hasOwn(globalThis, 'chrome');
+  const previousChrome = globalThis.chrome;
+  process.on('unhandledRejection', recordUnhandled);
+  t.after(() => {
+    process.off('unhandledRejection', recordUnhandled);
+    if (hadChrome) globalThis.chrome = previousChrome;
+    else delete globalThis.chrome;
+  });
+
+  globalThis.chrome = {
+    storage: {
+      session: sessionStorage.session,
+      local: retryStorage.area
+    },
+    alarms: {
+      onAlarm: alarmEvent.api,
+      async get(name) { return alarms.get(name); },
+      create(name, info) {
+        createCount += 1;
+        if (createCount === 1) {
+          failedCreate.resolve();
+          return Promise.reject(new Error('injected alarm creation failure'));
+        }
+        alarms.set(name, { name, ...structuredClone(info) });
+        recreated.resolve();
+      },
+      async clear(name) { return alarms.delete(name); }
+    },
+    runtime: {
+      connectNative() {
+        return {
+          onDisconnect: portDisconnect.api,
+          onMessage: portMessage.api,
+          postMessage() {}
+        };
+      },
+      onStartup: runtimeStartup.api,
+      onInstalled: runtimeInstalled.api
+    },
+    tabs: {
+      onUpdated: tabUpdated.api,
+      async query() {
+        startupCompleted.resolve();
+        return [];
+      }
+    }
+  };
+
+  await import(new URL('./service-worker.mjs?fire-and-forget-recovery-test', import.meta.url));
+  await failedCreate.promise;
+  await new Promise(setImmediate);
+
+  const persisted = retryStorage.snapshot()[RETRY_STATE_KEY];
+  assert.equal(persisted.deadlineMilliseconds, retryDeadline);
+  assert.equal(alarms.get(RETRY_ALARM_NAME), undefined);
+  assert.deepEqual(sessionStorage.snapshot().outbox, [{ eventId: 'retained' }]);
+
+  runtimeStartup.emit();
+  await recreated.promise;
+  await startupCompleted.promise;
+  await new Promise(setImmediate);
+
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, persisted.deadlineMilliseconds);
+  assert.deepEqual(unhandled, []);
 });
 
 test('alarm wake clears the old deadline before reconnecting and keeps backoff across suspension', async () => {

@@ -100,6 +100,44 @@ private final class CountingInboxConsumer: ChromeInboxConsuming, @unchecked Send
     }
 }
 
+private final class ReplayUntilAcknowledgedInboxConsumer: ChromeInboxConsuming, @unchecked Sendable {
+    private let lock = NSLock()
+    private let batch: ChromeConsumeBatch
+    private var isAcknowledged = false
+    private var _consumeCount = 0
+    private var _acknowledgedDeliveryIDs: [UUID] = []
+
+    init(record: ChromeInboxRecord, deliveryID: UUID) {
+        batch = ChromeConsumeBatch(
+            records: [record],
+            deliveryID: deliveryID,
+            committedOffset: 0,
+            health: .healthy
+        )
+    }
+
+    var consumeCount: Int { lock.withLock { _consumeCount } }
+    var acknowledgedDeliveryIDs: [UUID] { lock.withLock { _acknowledgedDeliveryIDs } }
+
+    func consumeAvailable() throws -> ChromeConsumeBatch {
+        lock.withLock {
+            _consumeCount += 1
+            return isAcknowledged
+                ? ChromeConsumeBatch(records: [], deliveryID: nil, committedOffset: 0, health: .healthy)
+                : batch
+        }
+    }
+
+    func acknowledgeDelivery(_ deliveryID: UUID) throws {
+        lock.withLock {
+            isAcknowledged = true
+            _acknowledgedDeliveryIDs.append(deliveryID)
+        }
+    }
+
+    func resetInMemoryState() {}
+}
+
 private final class PausingInboxConsumer: ChromeInboxConsuming, @unchecked Sendable {
     private let condition = NSCondition()
     private let record: ChromeInboxRecord
@@ -141,20 +179,31 @@ private final class PausingInboxConsumer: ChromeInboxConsuming, @unchecked Senda
 }
 
 private final class RecordingObservationClearer: ObservationClearing, @unchecked Sendable {
-    private let report: ObservationClearReport
     private let lock = NSLock()
     private var _clearCount = 0
+    private var failures: [ObservationClearCategory]
 
     init(failures: [ObservationClearCategory] = []) {
-        report = ObservationClearReport(oldGeneration: 0, newGeneration: 1, failures: failures)
+        self.failures = failures
     }
 
     var clearCount: Int { lock.withLock { _clearCount } }
 
     func clearObservationData(inMemoryReset: () throws -> Void) throws -> ObservationClearReport {
-        lock.withLock { _clearCount += 1 }
+        let currentFailures = lock.withLock {
+            _clearCount += 1
+            return failures
+        }
         try inMemoryReset()
-        return report
+        return ObservationClearReport(
+            oldGeneration: 0,
+            newGeneration: 1,
+            failures: currentFailures
+        )
+    }
+
+    func setFailures(_ failures: [ObservationClearCategory]) {
+        lock.withLock { self.failures = failures }
     }
 }
 
@@ -318,12 +367,12 @@ private final class PausingChromeEvidenceCoordinator: ObservationPipelineCoordin
     private(set) var firstDeliveryStarted = false
     private var firstDeliveryContinuation: CheckedContinuation<Void, Never>?
 
-    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async -> SpeakerRecoveryOutcome {
+    func ensureProtected(for evidence: ChromeTabEvidence) async -> ChromeSafetyDeliveryResult {
         receiveCount += 1
-        guard receiveCount == 1 else { return .noPendingRecovery }
+        guard receiveCount == 1 else { return .protected }
         firstDeliveryStarted = true
         await withCheckedContinuation { firstDeliveryContinuation = $0 }
-        return .noPendingRecovery
+        return .protected
     }
 
     func receiveAudioRouteChanged() async {}
@@ -339,7 +388,7 @@ private final class PausingChromeEvidenceCoordinator: ObservationPipelineCoordin
         return ObservationClearBoundary(generation: 0)
     }
 
-    func endObservationClear(_: ObservationClearBoundary) {}
+    func endObservationClear(_: ObservationClearBoundary, report _: ObservationClearReport?) {}
 
     func resumeFirstDelivery() {
         let continuation = firstDeliveryContinuation
@@ -351,16 +400,21 @@ private final class PausingChromeEvidenceCoordinator: ObservationPipelineCoordin
 
 @MainActor
 private final class OutcomeChromeEvidenceCoordinator: ObservationPipelineCoordinating {
-    private let outcome: SpeakerRecoveryOutcome
+    private var results: [ChromeSafetyDeliveryResult]
     private(set) var receiveCount = 0
+    private(set) var endedClearReports: [ObservationClearReport?] = []
 
-    init(outcome: SpeakerRecoveryOutcome) {
-        self.outcome = outcome
+    init(result: ChromeSafetyDeliveryResult) {
+        results = [result]
     }
 
-    func receiveChromeEvidence(_: ChromeTabEvidence) async -> SpeakerRecoveryOutcome {
+    init(results: [ChromeSafetyDeliveryResult]) {
+        self.results = results
+    }
+
+    func ensureProtected(for _: ChromeTabEvidence) async -> ChromeSafetyDeliveryResult {
         receiveCount += 1
-        return outcome
+        return results.count > 1 ? results.removeFirst() : results[0]
     }
 
     func receiveAudioRouteChanged() async {}
@@ -369,7 +423,9 @@ private final class OutcomeChromeEvidenceCoordinator: ObservationPipelineCoordin
     func beginObservationClear() async -> ObservationClearBoundary {
         ObservationClearBoundary(generation: 0)
     }
-    func endObservationClear(_: ObservationClearBoundary) {}
+    func endObservationClear(_: ObservationClearBoundary, report: ObservationClearReport?) {
+        endedClearReports.append(report)
+    }
 }
 
 @MainActor
@@ -614,7 +670,7 @@ func cursorRetryBatchRecordIsDeliveredToLiveAppPresentation() async throws {
 func successfulChromeSafetyAcknowledgesDurablePendingDelivery() async throws {
     let record = appRecord()
     let deliveryID = UUID()
-    let coordinator = OutcomeChromeEvidenceCoordinator(outcome: .noPendingRecovery)
+    let coordinator = OutcomeChromeEvidenceCoordinator(result: .protected)
     let harness = try AppViewModelHarness(
         lifecycle: .ready,
         records: [record],
@@ -636,7 +692,7 @@ func successfulChromeSafetyAcknowledgesDurablePendingDelivery() async throws {
 func unsafeChromeOutcomeLeavesPendingDeliveryForRetry() async throws {
     let record = appRecord()
     let deliveryID = UUID()
-    let coordinator = OutcomeChromeEvidenceCoordinator(outcome: .failedSafetyUnknown)
+    let coordinator = OutcomeChromeEvidenceCoordinator(result: .unsafe)
     let harness = try AppViewModelHarness(
         lifecycle: .ready,
         records: [record],
@@ -650,6 +706,65 @@ func unsafeChromeOutcomeLeavesPendingDeliveryForRetry() async throws {
 
     #expect(coordinator.receiveCount == 1)
     #expect(harness.consumer.acknowledgedDeliveryIDs.isEmpty)
+}
+
+@MainActor
+@Test
+func unsafeChromeSafetyDeliveryIsRetriedUntilProtectionIsVerified() async throws {
+    let record = appRecord()
+    let deliveryID = UUID()
+    let consumer = ReplayUntilAcknowledgedInboxConsumer(record: record, deliveryID: deliveryID)
+    let coordinator = OutcomeChromeEvidenceCoordinator(results: [.unsafe, .protected])
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        inboxConsumer: consumer,
+        observationPipelineCoordinator: coordinator
+    )
+
+    await harness.model.pollChromeInbox()
+    for _ in 0..<100 where coordinator.receiveCount < 1 { await Task.yield() }
+
+    #expect(consumer.consumeCount == 1)
+    #expect(coordinator.receiveCount == 1)
+    #expect(consumer.acknowledgedDeliveryIDs.isEmpty)
+
+    await harness.model.pollChromeInbox()
+    for _ in 0..<100 where coordinator.receiveCount < 2 { await Task.yield() }
+    for _ in 0..<100 where consumer.acknowledgedDeliveryIDs.isEmpty { await Task.yield() }
+
+    #expect(consumer.consumeCount == 2)
+    #expect(coordinator.receiveCount == 2)
+    #expect(consumer.acknowledgedDeliveryIDs == [deliveryID])
+}
+
+@MainActor
+@Test
+func chromePollSingleFlightCoversSafetyDeliveryAndDurableAcknowledgement() async throws {
+    let record = appRecord()
+    let deliveryID = UUID()
+    let consumer = ReplayUntilAcknowledgedInboxConsumer(record: record, deliveryID: deliveryID)
+    let coordinator = PausingChromeEvidenceCoordinator()
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        inboxConsumer: consumer,
+        observationPipelineCoordinator: coordinator
+    )
+
+    let firstPoll = Task { @MainActor in await harness.model.pollChromeInbox() }
+    for _ in 0..<100 where !coordinator.firstDeliveryStarted { await Task.yield() }
+    #expect(coordinator.firstDeliveryStarted)
+
+    try await Task.sleep(for: .milliseconds(700))
+    await harness.model.pollChromeInbox()
+
+    #expect(consumer.consumeCount == 1)
+    #expect(coordinator.receiveCount == 1)
+    #expect(consumer.acknowledgedDeliveryIDs.isEmpty)
+
+    coordinator.resumeFirstDelivery()
+    await firstPoll.value
+
+    #expect(consumer.acknowledgedDeliveryIDs == [deliveryID])
 }
 
 @MainActor
@@ -669,7 +784,7 @@ func replayedPendingDeliveryDoesNotDuplicatePersistedChromeTimelinePresentation(
         events: [persisted],
         records: [record],
         deliveryID: UUID(),
-        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(outcome: .noPendingRecovery)
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
     )
 
     await harness.model.pollChromeInbox()
@@ -723,7 +838,7 @@ func clearInvalidatesQueuedChromeDeliveryAndWaitsForInFlightDelivery() async thr
         records: [firstRecord, secondRecord],
         observationPipelineCoordinator: chromeCoordinator
     )
-    await harness.model.pollChromeInbox()
+    let poll = Task { @MainActor in await harness.model.pollChromeInbox() }
     for _ in 0..<100 where !chromeCoordinator.firstDeliveryStarted {
         await Task.yield()
     }
@@ -735,8 +850,10 @@ func clearInvalidatesQueuedChromeDeliveryAndWaitsForInFlightDelivery() async thr
         await Task.yield()
     }
     #expect(harness.model.isClearingObservationData)
+    #expect(harness.clearer.clearCount == 0)
 
     chromeCoordinator.resumeFirstDelivery()
+    await poll.value
     await clear.value
 
     #expect(chromeCoordinator.receiveCount == 1)
@@ -931,6 +1048,22 @@ func partialClearFailureIsPresentedExplicitly() async throws {
 
 @MainActor
 @Test
+func partialClearReportIsPassedToCoordinatorClearBoundary() async throws {
+    let coordinator = OutcomeChromeEvidenceCoordinator(result: .notRequired)
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        clearFailures: [.inbox],
+        observationPipelineCoordinator: coordinator
+    )
+
+    await harness.model.clearObservationData()
+
+    #expect(coordinator.endedClearReports.count == 1)
+    #expect(coordinator.endedClearReports[0]?.failures == [.inbox])
+}
+
+@MainActor
+@Test
 func eventsClearFailureKeepsTimelineVisibleAndConsistentAfterRestart() async throws {
     let root = FileManager.default.temporaryDirectory
         .appending(path: "lidmute-app-events-clear-failure-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -950,7 +1083,7 @@ func eventsClearFailureKeepsTimelineVisibleAndConsistentAfterRestart() async thr
         observationStore: clearer,
         lifecycle: lifecycle,
         chromeManifestURL: manifestURL,
-        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(outcome: .noPendingRecovery)
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
     )
     let timelineBeforeClear = model.events
 
@@ -1017,4 +1150,48 @@ func coordinatorHealthyRecoveryDoesNotHideAnUnrelatedPartialClearStatus() async 
 
     #expect(harness.model.storageStatusText == "部分数据未清空：events")
     harness.model.stopAll()
+}
+
+@MainActor
+@Test
+func coordinatorAndOperationalStorageHealthRecoverIndependentlyInBothOrders() async throws {
+    let coordinatorFirst = try AppViewModelHarness(
+        lifecycle: .ready,
+        clearFailures: [.events]
+    )
+    coordinatorFirst.model.receiveCoordinatorStorageHealth(.permissionFailure)
+    await coordinatorFirst.model.clearObservationData()
+
+    #expect(
+        coordinatorFirst.model.storageStatusText ==
+            "观察存储权限不足\n部分数据未清空：events"
+    )
+    #expect(coordinatorFirst.model.storageStatusSeverity == .error)
+
+    coordinatorFirst.clearer.setFailures([])
+    await coordinatorFirst.model.clearObservationData()
+
+    #expect(coordinatorFirst.model.storageStatusText == "观察存储权限不足")
+    #expect(coordinatorFirst.model.storageStatusSeverity == .error)
+    coordinatorFirst.model.stopAll()
+
+    let operationalFirst = try AppViewModelHarness(
+        lifecycle: .ready,
+        clearFailures: [.events]
+    )
+    await operationalFirst.model.clearObservationData()
+    #expect(operationalFirst.model.storageStatusText == "部分数据未清空：events")
+    #expect(operationalFirst.model.storageStatusSeverity == .warning)
+
+    operationalFirst.model.receiveCoordinatorStorageHealth(.capacityFailure)
+    #expect(
+        operationalFirst.model.storageStatusText ==
+            "观察存储空间不足\n部分数据未清空：events"
+    )
+    #expect(operationalFirst.model.storageStatusSeverity == .error)
+
+    operationalFirst.model.receiveCoordinatorStorageHealth(.healthy)
+    #expect(operationalFirst.model.storageStatusText == "部分数据未清空：events")
+    #expect(operationalFirst.model.storageStatusSeverity == .warning)
+    operationalFirst.model.stopAll()
 }

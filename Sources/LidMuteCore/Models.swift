@@ -229,13 +229,17 @@ public enum SpeakerRecoveryOutcome: Equatable, Sendable {
     case failedSafetyUnknown
 }
 
-public extension SpeakerRecoveryOutcome {
-    var observationDeliveryIsSafeToAcknowledge: Bool {
+public enum ChromeSafetyDeliveryResult: Equatable, Sendable {
+    case notRequired
+    case protected
+    case verifiedSilent
+    case unsafe
+
+    public var deliveryIsSafeToAcknowledge: Bool {
         switch self {
-        case .noPendingRecovery, .restored, .failedButVerifiedSilent:
+        case .notRequired, .protected, .verifiedSilent:
             true
-        case .waitingForMatchingDevice, .corruptSnapshot,
-             .unsupportedSnapshot, .failedSafetyUnknown:
+        case .unsafe:
             false
         }
     }

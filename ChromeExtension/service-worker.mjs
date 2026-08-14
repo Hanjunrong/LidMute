@@ -11,6 +11,10 @@ let nativePort;
 let outboxController;
 let retryScheduler;
 
+function runSafely(operation) {
+  void Promise.resolve().then(operation).catch(() => {});
+}
+
 export function toAudibleFrame(tab, sessionId, seq) {
   return {
     v: 1,
@@ -229,10 +233,10 @@ export function createOutboxController(storage, post, scheduleRetry, resetRetry 
         if (!TERMINAL_DISPOSITIONS.has(ack.disposition)) return;
 
         const current = await currentState();
-        await storage.set({
-          outbox: (current.outbox ?? []).filter((event) => event.eventId !== ack.eventId)
-        });
-        await resetRetry();
+        const outbox = (current.outbox ?? []).filter((event) => event.eventId !== ack.eventId);
+        await storage.set({ outbox });
+        if (outbox.length === 0) await resetRetry();
+        else await scheduleRetry();
       });
     },
     flush() {
@@ -285,9 +289,11 @@ function connect() {
   nativePort = port;
   port.onDisconnect.addListener(() => {
     if (nativePort === port) nativePort = undefined;
-    scheduleRetry();
+    runSafely(scheduleRetry);
   });
-  port.onMessage.addListener((message) => void controller().acknowledge(message));
+  port.onMessage.addListener((message) => {
+    runSafely(() => controller().acknowledge(message));
+  });
   return port;
 }
 
@@ -306,14 +312,20 @@ async function sendAudibleTab(tab) {
 
 if (typeof chrome !== 'undefined') {
   chrome.tabs.onUpdated.addListener((_id, changeInfo, tab) => {
-    if (changeInfo.audible === true) void sendAudibleTab(tab);
+    if (changeInfo.audible === true) runSafely(() => sendAudibleTab(tab));
   });
-  chrome.alarms.onAlarm.addListener((alarm) => void retries().fire(alarm));
-  void retries().restore();
-  chrome.runtime.onStartup.addListener(async () => {
-    await retries().restore();
-    await flushOutbox();
-    for (const tab of await chrome.tabs.query({ audible: true })) void sendAudibleTab(tab);
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    runSafely(() => retries().fire(alarm));
   });
-  chrome.runtime.onInstalled.addListener(() => void flushOutbox());
+  runSafely(() => retries().restore());
+  chrome.runtime.onStartup.addListener(() => {
+    runSafely(async () => {
+      await retries().restore();
+      await flushOutbox();
+      for (const tab of await chrome.tabs.query({ audible: true })) {
+        await sendAudibleTab(tab);
+      }
+    });
+  });
+  chrome.runtime.onInstalled.addListener(() => runSafely(flushOutbox));
 }
