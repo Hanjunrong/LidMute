@@ -23,6 +23,14 @@ protocol LifecycleStateProviding: AnyObject {
 extension ApplicationLifecycleCoordinator: LifecycleStateProviding {}
 
 @MainActor
+protocol ChromeEvidenceCoordinating: AnyObject {
+    func receiveChromeEvidence(_ evidence: ChromeTabEvidence) async
+    func flushObservationLogging() async
+}
+
+extension ProtectionCoordinator: ChromeEvidenceCoordinating {}
+
+@MainActor
 final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationShuttingDown {
     @Published var isEnabled = false
     @Published var isLightweightModeEnabled = false
@@ -61,6 +69,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private let store: any EventStoring
     private let inboxConsumer: any ChromeInboxConsuming
     private let observationStore: any ObservationClearing
+    private let chromeEvidenceCoordinator: any ChromeEvidenceCoordinating
     private let applicationSupport: URL
     private let chromeManifestURL: URL
     private var audioTimer: Timer?
@@ -79,6 +88,8 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var protectionEventTask: Task<Void, Never>?
     private var routeChangeTask: Task<Void, Never>?
     private var routeChangePending = false
+    private var isChromeInboxPollInFlight = false
+    private var observationEpoch: UInt64 = 0
 
     init(
         applicationSupport: URL? = nil,
@@ -86,7 +97,8 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         inboxConsumer: (any ChromeInboxConsuming)? = nil,
         observationStore: (any ObservationClearing)? = nil,
         lifecycle: (any LifecycleStateProviding)? = nil,
-        chromeManifestURL: URL? = nil
+        chromeManifestURL: URL? = nil,
+        chromeEvidenceCoordinator: (any ChromeEvidenceCoordinating)? = nil
     ) {
         let support = applicationSupport ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -128,11 +140,13 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         )
         self.audioController = audioController
         self.recoveryRuntime = recoveryRuntime
-        coordinator = ProtectionCoordinator(
+        let coordinator = ProtectionCoordinator(
             protection: recoveryRuntime,
             processEvidence: audioController,
             store: store
         )
+        self.coordinator = coordinator
+        self.chromeEvidenceCoordinator = chromeEvidenceCoordinator ?? coordinator
         let lifecycleCoordinator = ApplicationLifecycleCoordinator(
             recovery: recoveryRuntime,
             monitors: self
@@ -349,7 +363,18 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     func clearObservationData() async {
         guard !isClearingObservationData else { return }
         isClearingObservationData = true
-        defer { isClearingObservationData = false }
+        observationEpoch &+= 1
+        let shouldResumePolling = inboxTimer != nil
+        inboxTimer?.invalidate()
+        inboxTimer = nil
+        defer {
+            isClearingObservationData = false
+            if shouldResumePolling { startChromeObservationTimerIfReady() }
+        }
+
+        let queuedProtectionWork = protectionEventTask
+        await queuedProtectionWork?.value
+        await chromeEvidenceCoordinator.flushObservationLogging()
 
         do {
             let report = try observationStore.clearObservationData { [self] in
@@ -372,10 +397,24 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
     }
 
-    func pollChromeInbox() {
-        guard lifecycleStateProvider.state == .ready, !isShuttingDown else { return }
+    func pollChromeInbox() async {
+        guard lifecycleStateProvider.state == .ready,
+              !isShuttingDown,
+              !isClearingObservationData,
+              !isChromeInboxPollInFlight else { return }
+        isChromeInboxPollInFlight = true
+        defer { isChromeInboxPollInFlight = false }
+
+        let consumer = inboxConsumer
+        let pollEpoch = observationEpoch
         do {
-            let batch = try inboxConsumer.consumeAvailable()
+            let batch = try await Task.detached(priority: .utility) {
+                try consumer.consumeAvailable()
+            }.value
+            guard lifecycleStateProvider.state == .ready,
+                  !isShuttingDown,
+                  !isClearingObservationData,
+                  observationEpoch == pollEpoch else { return }
             guard !batch.records.isEmpty else {
                 checkChromeConnection()
                 return
@@ -385,8 +424,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 latestChromeEvidence = record.evidence
                 receiveCoordinatorEvent(Self.timelineEvent(for: record))
                 enqueueProtectionEvent { model in
-                    guard !model.isShuttingDown else { return }
-                    await model.coordinator.receiveChromeEvidence(record.evidence)
+                    guard !model.isShuttingDown,
+                          !model.isClearingObservationData,
+                          model.observationEpoch == pollEpoch else { return }
+                    await model.chromeEvidenceCoordinator.receiveChromeEvidence(record.evidence)
                     model.refresh()
                 }
             }
@@ -466,9 +507,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
               !isShuttingDown,
               inboxTimer == nil else { return }
         inboxTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.pollChromeInbox() }
+            Task { @MainActor [weak self] in await self?.pollChromeInbox() }
         }
-        pollChromeInbox()
+        Task { @MainActor [weak self] in await self?.pollChromeInbox() }
     }
 
     private func resolveChromeExtensionPath() {

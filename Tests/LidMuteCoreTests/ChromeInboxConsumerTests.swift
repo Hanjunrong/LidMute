@@ -5,14 +5,21 @@ import Testing
 private final class CursorFailingFileSystem: ObservationFileSystem, @unchecked Sendable {
     private let base = POSIXObservationFileSystem()
     private let cursorURL: URL
+    private let eventsURL: URL
     var failNextCursorWrite = false
     private(set) var rangeReadOffsets: [UInt64] = []
+    private(set) var eventReadCount = 0
+    private(set) var eventWriteCount = 0
 
-    init(cursorURL: URL) {
+    init(cursorURL: URL, eventsURL: URL) {
         self.cursorURL = cursorURL
+        self.eventsURL = eventsURL
     }
 
-    func read(_ url: URL) throws -> Data { try base.read(url) }
+    func read(_ url: URL) throws -> Data {
+        if url == eventsURL { eventReadCount += 1 }
+        return try base.read(url)
+    }
 
     func read(_ url: URL, fromOffset offset: UInt64) throws -> Data {
         rangeReadOffsets.append(offset)
@@ -42,6 +49,7 @@ private final class CursorFailingFileSystem: ObservationFileSystem, @unchecked S
             failNextCursorWrite = false
             throw CocoaError(.fileWriteUnknown)
         }
+        if url == eventsURL { eventWriteCount += 1 }
         try base.atomicWrite(data, to: url, permissions: permissions)
     }
 
@@ -64,7 +72,7 @@ private final class ConsumerFixture {
         root = FileManager.default.temporaryDirectory
             .appending(path: "lidmute-consumer-\(UUID().uuidString)", directoryHint: .isDirectory)
         paths = ObservationPaths(root: root)
-        fileSystem = CursorFailingFileSystem(cursorURL: paths.cursor)
+        fileSystem = CursorFailingFileSystem(cursorURL: paths.cursor, eventsURL: paths.events)
         let lock = InProcessObservationLock()
         observations = ObservationStore(paths: paths, fileSystem: fileSystem, lock: lock)
         events = BoundedJSONLineEventStore(
@@ -175,8 +183,36 @@ func cursorCommitFailureReplaysWithoutTimelineDuplicateAfterRestart() throws {
         #expect(try fixture.events.recent(limit: 10).count == 1)
 
         let restarted = fixture.makeConsumer()
-        #expect(try restarted.consumeAvailable().records.isEmpty)
+        #expect(try restarted.consumeAvailable().records == [record])
         #expect(try fixture.events.recent(limit: 10).count == 1)
+    }
+}
+
+@Test
+func consumerAppendsACompleteBatchWithOneEventRewrite() throws {
+    try withConsumerFixture { fixture in
+        let first = fixture.record(eventID: UUID(), generation: 0, title: "first")
+        let second = fixture.record(eventID: UUID(), generation: 0, title: "second")
+        try fixture.appendRecord(first)
+        try fixture.appendRecord(second)
+
+        let batch = try fixture.consumer.consumeAvailable()
+
+        #expect(batch.records == [first, second])
+        #expect(fixture.fileSystem.eventReadCount == 1)
+        #expect(fixture.fileSystem.eventWriteCount == 1)
+        #expect(try fixture.events.recent(limit: 10).count == 2)
+    }
+}
+
+@Test
+func emptyInboxPollDoesNotReadOrRewriteEventHistory() throws {
+    try withConsumerFixture { fixture in
+        let batch = try fixture.consumer.consumeAvailable()
+
+        #expect(batch.records.isEmpty)
+        #expect(fixture.fileSystem.eventReadCount == 0)
+        #expect(fixture.fileSystem.eventWriteCount == 0)
     }
 }
 

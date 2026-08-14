@@ -1,8 +1,124 @@
 import XCTest
 @testable import LidMuteCore
 
+private actor TimelineProtectionApplying: SpeakerProtectionApplying {
+    private let timeline: SharedOperationTimeline
+
+    init(timeline: SharedOperationTimeline) {
+        self.timeline = timeline
+    }
+
+    func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
+        switch action {
+        case .begin:
+            timeline.append("protection.begin")
+            return .noPendingRecovery
+        case .end:
+            timeline.append("protection.end")
+            return .restored
+        case .reinforce:
+            timeline.append("protection.reinforce")
+            return .noPendingRecovery
+        case .routeChangedWhileProtectionRequired:
+            timeline.append("protection.routeChanged")
+            return .noPendingRecovery
+        }
+    }
+}
+
+private final class PausingObservationEventStore: EventStoring, @unchecked Sendable {
+    private let condition = NSCondition()
+    private let timeline: SharedOperationTimeline
+    private var events: [LidMuteEvent] = []
+    private var shouldPauseLidClosed = true
+    private var lidClosedPaused = false
+    private var resumeLidClosed = false
+
+    init(timeline: SharedOperationTimeline) {
+        self.timeline = timeline
+    }
+
+    var isLidClosedAppendPaused: Bool {
+        condition.withLock { lidClosedPaused }
+    }
+
+    func append(_ event: LidMuteEvent) throws {
+        condition.lock()
+        events.append(event)
+        timeline.append("store.\(event.kind)")
+        if event.kind == .lidClosed, shouldPauseLidClosed {
+            shouldPauseLidClosed = false
+            lidClosedPaused = true
+            condition.broadcast()
+            let deadline = Date().addingTimeInterval(0.25)
+            while !resumeLidClosed, condition.wait(until: deadline) {}
+            lidClosedPaused = false
+        }
+        condition.unlock()
+    }
+
+    func load() throws -> [LidMuteEvent] {
+        condition.withLock { events }
+    }
+
+    func clear() throws {
+        condition.withLock { events.removeAll() }
+    }
+
+    func resumePausedAppend() {
+        condition.withLock {
+            resumeLidClosed = true
+            condition.broadcast()
+        }
+    }
+}
+
 @MainActor
 final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
+    func testObservationStorageCannotDelaySpeakerSafetyTransitions() async throws {
+        let timeline = SharedOperationTimeline()
+        let protection = TimelineProtectionApplying(timeline: timeline)
+        let store = PausingObservationEventStore(timeline: timeline)
+        let coordinator = ProtectionCoordinator(
+            protection: protection,
+            processEvidence: ScriptedAudioController(),
+            store: store
+        )
+
+        await coordinator.setEnabled(true)
+        await coordinator.receivePhysicalLid(closed: true)
+        for _ in 0..<100 where !store.isLidClosedAppendPaused {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(store.isLidClosedAppendPaused)
+        XCTAssertLessThan(
+            try XCTUnwrap(timeline.snapshot().firstIndex(of: "protection.begin")),
+            try XCTUnwrap(timeline.snapshot().firstIndex(of: "store.lidClosed"))
+        )
+
+        let mainActorRanWhileStorePaused = LockedFlag()
+        await Task.detached {
+            await MainActor.run {
+                if store.isLidClosedAppendPaused { mainActorRanWhileStorePaused.set() }
+            }
+        }.value
+        XCTAssertTrue(mainActorRanWhileStorePaused.get())
+
+        await coordinator.receivePhysicalLid(closed: false)
+        XCTAssertTrue(timeline.snapshot().contains("protection.end"))
+        XCTAssertTrue(store.isLidClosedAppendPaused)
+
+        store.resumePausedAppend()
+        for _ in 0..<100 {
+            if try store.load().count == 5 { break }
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            try store.load().map(\.kind),
+            [.protectionEnabled, .lidClosed, .muteEnforced, .lidOpened, .restored]
+        )
+    }
+
     // This fails if coordinator waits on a semaphore and blocks MainActor during speaker I/O.
     func testProtectionTransitionYieldsMainActorWhileApplying() async {
         let applying = DelayedProtectionApplying(delay: .milliseconds(100))

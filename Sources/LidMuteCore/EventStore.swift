@@ -27,6 +27,18 @@ public struct EventStoreAppendResult: Sendable {
     }
 }
 
+public struct EventStoreBatchAppendResult: Sendable {
+    public let appended: [LidMuteEvent]
+    public let inserted: [LidMuteEvent]
+    public let evictedCount: Int
+
+    public init(appended: [LidMuteEvent], inserted: [LidMuteEvent], evictedCount: Int) {
+        self.appended = appended
+        self.inserted = inserted
+        self.evictedCount = evictedCount
+    }
+}
+
 public final class BoundedJSONLineEventStore: EventStoring, @unchecked Sendable {
     public private(set) var health: ObservationStorageHealth = .healthy
 
@@ -54,25 +66,43 @@ public final class BoundedJSONLineEventStore: EventStoring, @unchecked Sendable 
 
     @discardableResult
     public func appendReporting(_ event: LidMuteEvent) throws -> EventStoreAppendResult {
-        try performStorageOperation {
+        let batch = try appendBatchReporting([event])
+        return EventStoreAppendResult(
+            appended: event,
+            evictedCount: batch.evictedCount,
+            wasInserted: !batch.inserted.isEmpty
+        )
+    }
+
+    @discardableResult
+    public func appendBatchReporting(_ newEvents: [LidMuteEvent]) throws -> EventStoreBatchAppendResult {
+        guard !newEvents.isEmpty else {
+            return EventStoreBatchAppendResult(appended: [], inserted: [], evictedCount: 0)
+        }
+        return try performStorageOperation {
             try lock.withExclusiveLock {
                 var events = try decodeEvents(fileSystem.read(url))
-                if let observationEventID = event.observationEventID,
-                   events.contains(where: { $0.observationEventID == observationEventID }) {
-                    return EventStoreAppendResult(
-                        appended: event,
-                        evictedCount: 0,
-                        wasInserted: false
-                    )
+                var persistedObservationIDs = Set(events.compactMap(\.observationEventID))
+                var inserted: [LidMuteEvent] = []
+                inserted.reserveCapacity(newEvents.count)
+                for event in newEvents {
+                    if let observationEventID = event.observationEventID,
+                       !persistedObservationIDs.insert(observationEventID).inserted {
+                        continue
+                    }
+                    events.append(event)
+                    inserted.append(event)
                 }
-                events.append(event)
+
                 let evictedCount = max(0, events.count - maximumCount)
                 let retained = maximumCount == 0 ? [] : Array(events.suffix(maximumCount))
-                try persist(retained)
-                return EventStoreAppendResult(
-                    appended: event,
-                    evictedCount: evictedCount,
-                    wasInserted: true
+                if !inserted.isEmpty {
+                    try persist(retained)
+                }
+                return EventStoreBatchAppendResult(
+                    appended: newEvents,
+                    inserted: inserted,
+                    evictedCount: evictedCount
                 )
             }
         }

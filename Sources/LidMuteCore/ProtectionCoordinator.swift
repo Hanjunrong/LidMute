@@ -17,6 +17,8 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     private var sequence: UInt64 = 0
     private var transitionTask: Task<Void, Never>?
     private var transitionSequence: UInt64 = 0
+    private var bufferedObservationEvents: [LidMuteEvent]?
+    private var observationLoggingTask: Task<Void, Never>?
 
     public init(
         protection: Protection,
@@ -71,6 +73,10 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         await enqueue(.shutdown)
     }
 
+    public func flushObservationLogging() async {
+        await observationLoggingTask?.value
+    }
+
     private func enqueue(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {
         let predecessor = transitionTask
         transitionSequence += 1
@@ -87,9 +93,14 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     }
 
     private func process(_ input: ProtectionCoordinatorInput) async -> SpeakerRecoveryOutcome {
-        guard let prepared = prepare(input) else { return .noPendingRecovery }
+        bufferedObservationEvents = []
+        guard let prepared = prepare(input) else {
+            enqueueBufferedObservationEvents()
+            return .noPendingRecovery
+        }
         let outcome = await protection.apply(prepared.action)
         complete(prepared.completion, outcome: outcome)
+        enqueueBufferedObservationEvents()
         return outcome
     }
 
@@ -358,11 +369,44 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
             chromeTab: chromeTab,
             correlation: correlation
         )
+        if bufferedObservationEvents != nil {
+            bufferedObservationEvents?.append(event)
+            return
+        }
+        persistSynchronously(event)
+    }
+
+    private func persistSynchronously(_ event: LidMuteEvent) {
         do {
             try store.append(event)
         } catch {
             // Event logging is observational and cannot relax speaker safety.
         }
+        onEvent?(event)
+    }
+
+    private func enqueueBufferedObservationEvents() {
+        let events = bufferedObservationEvents ?? []
+        bufferedObservationEvents = nil
+        guard !events.isEmpty else { return }
+
+        let predecessor = observationLoggingTask
+        let store = store
+        let task = Task.detached(priority: .utility) { [weak self] in
+            await predecessor?.value
+            for event in events {
+                do {
+                    try store.append(event)
+                } catch {
+                    // Event logging is observational and cannot relax speaker safety.
+                }
+                await self?.publishLoggedEvent(event)
+            }
+        }
+        observationLoggingTask = task
+    }
+
+    private func publishLoggedEvent(_ event: LidMuteEvent) {
         onEvent?(event)
     }
 }

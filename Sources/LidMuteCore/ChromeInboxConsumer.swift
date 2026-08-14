@@ -73,17 +73,18 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
                 let generation = try observationStore.currentGeneration()
                 let inbox = try readInboxSnapshot()
                 let storedCursor = try readCursor()
-                let cursor = try normalizedCursor(
+                let normalization = try normalizedCursor(
                     storedCursor,
                     generation: generation,
                     inbox: inbox
                 )
+                let cursor = normalization.cursor
                 let unreadStart = cursor.offset + UInt64(cursor.remainder.count)
                 var combined = cursor.remainder
                 combined.append(try fileSystem.read(paths.inbox, fromOffset: unreadStart))
 
                 let split = try splitCompleteRecords(combined)
-                var insertedRecords: [ChromeInboxRecord] = []
+                var consumable: [(record: ChromeInboxRecord, event: LidMuteEvent)] = []
                 for (index, line) in split.lines.enumerated() {
                     let record: ChromeInboxRecord
                     do {
@@ -106,9 +107,16 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
                         chromeTab: record.evidence,
                         correlation: .browserObservedOnly
                     )
-                    if try eventStore.appendReporting(event).wasInserted {
-                        insertedRecords.append(record)
+                    consumable.append((record, event))
+                }
+
+                let appendResult = try eventStore.appendBatchReporting(consumable.map(\.event))
+                let insertedEventIDs = Set(appendResult.inserted.compactMap(\.observationEventID))
+                let deliveredRecords = consumable.compactMap { item in
+                    if !normalization.suppressPreviouslyCommittedDelivery {
+                        return item.record
                     }
+                    return insertedEventIDs.contains(item.record.eventID) ? item.record : nil
                 }
 
                 let committedOffset = cursor.offset + UInt64(split.completeByteCount)
@@ -123,7 +131,7 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
                 }
 
                 return ChromeConsumeBatch(
-                    records: insertedRecords,
+                    records: deliveredRecords,
                     committedOffset: committedOffset,
                     health: .healthy
                 )
@@ -161,21 +169,37 @@ public final class ChromeInboxConsumer: ChromeInboxConsuming, @unchecked Sendabl
         _ cursor: ChromeConsumeCursor?,
         generation: UInt64,
         inbox: InboxSnapshot
-    ) throws -> ChromeConsumeCursor {
-        guard let cursor,
-              cursor.generation == generation,
+    ) throws -> CursorNormalization {
+        guard let cursor else {
+            return CursorNormalization(
+                cursor: ChromeConsumeCursor(
+                    generation: generation,
+                    inode: inbox.inode,
+                    offset: 0,
+                    remainder: Data()
+                ),
+                suppressPreviouslyCommittedDelivery: false
+            )
+        }
+        guard cursor.generation == generation,
               cursor.inode == inbox.inode,
               cursor.remainder.count <= Self.maximumRecordBytes,
               let scannedOffset = cursor.offset.addingWithoutOverflow(UInt64(cursor.remainder.count)),
               scannedOffset <= inbox.size else {
-            return ChromeConsumeCursor(
-                generation: generation,
-                inode: inbox.inode,
-                offset: 0,
-                remainder: Data()
+            return CursorNormalization(
+                cursor: ChromeConsumeCursor(
+                    generation: generation,
+                    inode: inbox.inode,
+                    offset: 0,
+                    remainder: Data()
+                ),
+                suppressPreviouslyCommittedDelivery: true
             )
         }
-        return cursor
+        return CursorNormalization(
+            cursor: cursor,
+            suppressPreviouslyCommittedDelivery: false
+        )
     }
 
     private func splitCompleteRecords(_ data: Data) throws -> CompleteRecordSplit {
@@ -255,6 +279,11 @@ private struct CompleteRecordSplit {
     let lines: [Data]
     let completeByteCount: Int
     let remainder: Data
+}
+
+private struct CursorNormalization {
+    let cursor: ChromeConsumeCursor
+    let suppressPreviouslyCommittedDelivery: Bool
 }
 
 private struct InboxSnapshot {
