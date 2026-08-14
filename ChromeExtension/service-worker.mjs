@@ -1,7 +1,12 @@
 const HOST_NAME = 'com.lidmute.nativehost';
 const OUTBOX_LIMIT = 256;
+const TERMINAL_DISPOSITIONS = new Set([
+  'accepted', 'duplicate', 'ignored_incognito', 'rejected_permanent'
+]);
 let nativePort;
 var reconnectTimer;
+let retryDelayMilliseconds = 1_000;
+let outboxController;
 
 export function toAudibleFrame(tab, sessionId, seq) {
   return {
@@ -35,51 +40,123 @@ export function replayOutbox(events, post) {
   for (const event of events) post(event);
 }
 
-async function state() {
-  const stored = await chrome.storage.session.get(['sessionId', 'seq', 'outbox']);
-  if (!stored.sessionId) {
-    stored.sessionId = crypto.randomUUID();
-    stored.seq = 0;
-    stored.outbox = [];
-    await chrome.storage.session.set(stored);
+export function createOutboxController(storage, post, scheduleRetry, resetRetry = () => {}) {
+  let tail = Promise.resolve();
+  const serial = (operation) => {
+    const result = tail.then(operation, operation);
+    tail = result.catch(() => {});
+    return result;
+  };
+
+  async function currentState() {
+    const current = await storage.get(['sessionId', 'seq', 'outbox']);
+    if (current.sessionId) return current;
+
+    const initialized = {
+      sessionId: crypto.randomUUID(),
+      seq: 0,
+      outbox: []
+    };
+    await storage.set(initialized);
+    return initialized;
   }
-  return stored;
+
+  return {
+    enqueue(frame) {
+      return serial(async () => {
+        const current = await currentState();
+        const outbox = [...(current.outbox ?? []), frame].slice(-OUTBOX_LIMIT);
+        await storage.set({ outbox });
+      });
+    },
+    enqueueNewTab(tab) {
+      return serial(async () => {
+        const current = await currentState();
+        const seq = Number(current.seq) + 1;
+        const event = toAudibleFrame(tab, current.sessionId, seq);
+        const outbox = [...(current.outbox ?? []), event].slice(-OUTBOX_LIMIT);
+        await storage.set({ seq, outbox });
+        return event;
+      });
+    },
+    acknowledge(ack) {
+      return serial(async () => {
+        if (ack?.type !== 'ack' || !ack.eventId) return;
+        if (ack.disposition === 'retryable_failure') {
+          scheduleRetry();
+          return;
+        }
+        if (!TERMINAL_DISPOSITIONS.has(ack.disposition)) return;
+
+        const current = await currentState();
+        await storage.set({
+          outbox: (current.outbox ?? []).filter((event) => event.eventId !== ack.eventId)
+        });
+        resetRetry();
+      });
+    },
+    flush() {
+      return serial(async () => {
+        const current = await currentState();
+        try {
+          replayOutbox(current.outbox ?? [], post);
+        } catch {
+          scheduleRetry();
+        }
+      });
+    }
+  };
+}
+
+function scheduleRetry() {
+  if (reconnectTimer) return;
+
+  const delay = retryDelayMilliseconds;
+  retryDelayMilliseconds = Math.min(delay * 2, 60_000);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    void flushOutbox();
+  }, delay);
+}
+
+function resetRetryDelay() {
+  retryDelayMilliseconds = 1_000;
+}
+
+function controller() {
+  if (!outboxController) {
+    outboxController = createOutboxController(
+      chrome.storage.session,
+      (event) => connect().postMessage(event),
+      scheduleRetry,
+      resetRetryDelay
+    );
+  }
+  return outboxController;
 }
 
 function connect() {
   if (nativePort) return nativePort;
-  nativePort = chrome.runtime.connectNative(HOST_NAME);
-  nativePort.onDisconnect.addListener(() => {
-    nativePort = undefined;
-    clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(() => void flushOutbox(), 1_000);
+  const port = chrome.runtime.connectNative(HOST_NAME);
+  nativePort = port;
+  port.onDisconnect.addListener(() => {
+    if (nativePort === port) nativePort = undefined;
+    scheduleRetry();
   });
-  nativePort.onMessage.addListener(acknowledge);
-  return nativePort;
+  port.onMessage.addListener((message) => void controller().acknowledge(message));
+  return port;
 }
 
 async function flushOutbox() {
-  const current = await state();
-  if (current.outbox.length === 0) return;
-  try {
-    const port = connect();
-    replayOutbox(current.outbox, (event) => port.postMessage(event));
-  } catch {
-    nativePort = undefined;
-  }
+  await controller().flush();
 }
 
 async function acknowledge(message) {
-  if (message?.type !== 'ack') return;
-  const current = await state();
-  await chrome.storage.session.set({ outbox: current.outbox.filter((event) => event.eventId !== message.eventId) });
+  await controller().acknowledge(message);
 }
 
 async function sendAudibleTab(tab) {
-  const current = await state();
-  const event = toAudibleFrame(tab, current.sessionId, Number(current.seq) + 1);
-  const outbox = [...current.outbox, event].slice(-OUTBOX_LIMIT);
-  await chrome.storage.session.set({ seq: Number(current.seq) + 1, outbox });
+  await controller().enqueueNewTab(tab);
   await flushOutbox();
 }
 
