@@ -520,7 +520,7 @@ public final class ObservationStore: @unchecked Sendable {
 
 extension ObservationStore: ChromeFrameAccepting {}
 
-private struct POSIXObservationError: Error, Sendable {
+struct POSIXObservationError: Error, Sendable {
     let code: Int32
 
     static var current: POSIXObservationError { POSIXObservationError(code: errno) }
