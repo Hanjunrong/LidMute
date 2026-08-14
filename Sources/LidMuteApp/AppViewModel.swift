@@ -16,6 +16,13 @@ enum ChromeConnectionState: Equatable {
 }
 
 @MainActor
+protocol LifecycleStateProviding: AnyObject {
+    var state: AppLifecycleState { get }
+}
+
+extension ApplicationLifecycleCoordinator: LifecycleStateProviding {}
+
+@MainActor
 final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationShuttingDown {
     @Published var isEnabled = false
     @Published var isLightweightModeEnabled = false
@@ -37,25 +44,25 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published private(set) var chromeRegistrationStatus = ""
     @Published private(set) var chromeExtensionPath = ""
     @Published private(set) var lifecycleState: AppLifecycleState = .recovering
+    @Published private(set) var storageStatusText = ""
+    @Published private(set) var isClearingObservationData = false
 
     var canToggleGuard: Bool { lifecycleState == .ready }
 
     private let coordinator: ProtectionCoordinator<SpeakerRecoveryRuntime>
     private let audioController: SystemAudioController
     private let recoveryRuntime: SpeakerRecoveryRuntime
-    private lazy var lifecycleCoordinator = ApplicationLifecycleCoordinator(
-        recovery: recoveryRuntime,
-        monitors: self
-    )
+    private var lifecycleCoordinator: ApplicationLifecycleCoordinator!
+    private var lifecycleStateProvider: (any LifecycleStateProviding)!
     private lazy var routeMonitor = SystemAudioRouteMonitor { [weak self] in
         self?.receiveAudioRouteChanged()
     }
     private lazy var simulationProtectionLifecycle = SimulationProtectionLifecycle(coordinator: coordinator)
-    private let store: JSONLineEventStore
+    private let store: any EventStoring
+    private let inboxConsumer: any ChromeInboxConsuming
+    private let observationStore: any ObservationClearing
     private let applicationSupport: URL
-    private let inboxURL: URL
-    private let chromeDeduplicator: ChromeEventDeduplicator
-    private var inboxOffset = 0
+    private let chromeManifestURL: URL
     private var audioTimer: Timer?
     private var inboxTimer: Timer?
     private var nightTimer: Timer?
@@ -73,15 +80,46 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var routeChangeTask: Task<Void, Never>?
     private var routeChangePending = false
 
-    init() {
-        self.applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    init(
+        applicationSupport: URL? = nil,
+        eventStore: (any EventStoring)? = nil,
+        inboxConsumer: (any ChromeInboxConsuming)? = nil,
+        observationStore: (any ObservationClearing)? = nil,
+        lifecycle: (any LifecycleStateProviding)? = nil,
+        chromeManifestURL: URL? = nil
+    ) {
+        let support = applicationSupport ?? FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "LidMute", directoryHint: .isDirectory)
-        store = JSONLineEventStore(url: applicationSupport.appending(path: "events.jsonl"))
-        inboxURL = applicationSupport.appending(path: "chrome-inbox.jsonl")
-        chromeDeduplicator = ChromeEventDeduplicator(url: applicationSupport.appending(path: "chrome-seen-event-ids.json"))
+        self.applicationSupport = support
+        self.chromeManifestURL = chromeManifestURL ?? FileManager.default.homeDirectoryForCurrentUser
+            .appending(path: "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.lidmute.nativehost.json")
+
+        let paths = ObservationPaths(root: support)
+        let fileSystem = POSIXObservationFileSystem()
+        let sharedLock = POSIXObservationLock(lockURL: paths.lock)
+        let productionObservationStore = ObservationStore(
+            paths: paths,
+            fileSystem: fileSystem,
+            lock: sharedLock
+        )
+        let productionEventStore = BoundedJSONLineEventStore(
+            url: paths.events,
+            maximumCount: 5_000,
+            fileSystem: fileSystem,
+            lock: sharedLock
+        )
+        store = eventStore ?? productionEventStore
+        self.observationStore = observationStore ?? productionObservationStore
+        self.inboxConsumer = inboxConsumer ?? ChromeInboxConsumer(
+            paths: paths,
+            observationStore: productionObservationStore,
+            eventStore: productionEventStore,
+            fileSystem: fileSystem
+        )
         let audioController = SystemAudioController()
         let recoveryStore = FileSpeakerRecoveryStore(
-            url: applicationSupport.appending(path: "speaker-recovery.json")
+            url: support.appending(path: "speaker-recovery.json")
         )
         let recoveryRuntime = SpeakerRecoveryRuntime(
             audio: audioController,
@@ -95,6 +133,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             processEvidence: audioController,
             store: store
         )
+        let lifecycleCoordinator = ApplicationLifecycleCoordinator(
+            recovery: recoveryRuntime,
+            monitors: self
+        )
+        self.lifecycleCoordinator = lifecycleCoordinator
+        lifecycleStateProvider = lifecycle ?? lifecycleCoordinator
         let nightConfiguration = nightPreferences.load()
         nightScheduleEnabled = nightConfiguration.enabled
         nightStartText = nightConfiguration.startText
@@ -103,7 +147,13 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             startMinutes: NightProtectionPreferences.minutes(from: nightConfiguration.startText) ?? 0,
             endMinutes: NightProtectionPreferences.minutes(from: nightConfiguration.endText) ?? 8 * 60
         )
-        coordinator.onEvent = { [weak self] _ in self?.refresh() }
+        coordinator.onEvent = { [weak self] event in self?.receiveCoordinatorEvent(event) }
+        do {
+            events = Array(try store.recent(limit: 5_000).reversed())
+        } catch {
+            events = []
+            storageStatusText = Self.storageFailureText(error)
+        }
         resolveChromeExtensionPath()
         refresh()
         checkChromeConnection()
@@ -114,6 +164,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         hasStarted = true
         await lifecycleCoordinator.start()
         lifecycleState = lifecycleCoordinator.state
+        startChromeObservationTimerIfReady()
         refresh()
     }
 
@@ -136,11 +187,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 Task { @MainActor [weak self] in
                     self?.pollAudioProcesses()
                 }
-            }
-        }
-        if inboxTimer == nil {
-            inboxTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.drainChromeInbox() }
             }
         }
         if nightTimer == nil {
@@ -203,6 +249,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             lifecycleCoordinator.resume(after: outcome)
             lifecycleState = lifecycleCoordinator.state
         }
+        startChromeObservationTimerIfReady()
         refresh()
     }
 
@@ -299,37 +346,64 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
     }
 
-    func clearLog() {
-        try? store.clear()
-        refresh()
+    func clearObservationData() async {
+        guard !isClearingObservationData else { return }
+        isClearingObservationData = true
+        defer { isClearingObservationData = false }
+
+        do {
+            let report = try observationStore.clearObservationData { [self] in
+                events.removeAll()
+                latestChromeEvidence = nil
+                lastChromeEventAt = nil
+                currentAudioSources = AudioSourcePresentation.current(
+                    processes: currentAudioProcesses,
+                    chromeTab: nil
+                )
+                inboxConsumer.resetInMemoryState()
+                chromeConnectionState = .waitingForExtension
+                chromeBridgeStatus = "等待 Chrome 扩展连接"
+            }
+            storageStatusText = report.isComplete
+                ? ""
+                : "部分数据未清空：\(report.failures.map(\.rawValue).joined(separator: "、"))"
+        } catch {
+            storageStatusText = Self.storageFailureText(error)
+        }
     }
 
-    private func drainChromeInbox() {
-        guard lifecycleState == .ready, !isShuttingDown else { return }
-        guard let data = try? Data(contentsOf: inboxURL), data.count > inboxOffset else {
-            checkChromeConnection()
-            return
-        }
-        let unread = data[inboxOffset...]
-        inboxOffset = data.count
-        var received = false
-        for line in String(decoding: unread, as: UTF8.self).split(separator: "\n") {
-            guard let decoded = try? ChromeBridgeFrame.decode(Data(line.utf8)),
-                  (try? chromeDeduplicator.accept(decoded.eventID)) == true else { continue }
-            chromeBridgeStatus = "已接收 Chrome 标签页事件"
-            latestChromeEvidence = decoded.evidence
-            enqueueProtectionEvent { model in
-                guard !model.isShuttingDown else { return }
-                await model.coordinator.receiveChromeEvidence(decoded.evidence)
-                model.refresh()
+    func pollChromeInbox() {
+        guard lifecycleStateProvider.state == .ready, !isShuttingDown else { return }
+        do {
+            let batch = try inboxConsumer.consumeAvailable()
+            guard !batch.records.isEmpty else {
+                checkChromeConnection()
+                return
             }
-            received = true
-        }
-        if received {
+
+            for record in batch.records {
+                latestChromeEvidence = record.evidence
+                receiveCoordinatorEvent(Self.timelineEvent(for: record))
+                enqueueProtectionEvent { model in
+                    guard !model.isShuttingDown else { return }
+                    await model.coordinator.receiveChromeEvidence(record.evidence)
+                    model.refresh()
+                }
+            }
             lastChromeEventAt = Date()
+            chromeConnectionState = .receivedEvent
+            chromeBridgeStatus = "已接收 Chrome 标签页事件"
+            rebuildCurrentAudioSources()
+        } catch {
+            storageStatusText = Self.storageFailureText(error)
         }
-        rebuildCurrentAudioSources()
-        checkChromeConnection()
+    }
+
+    func receiveCoordinatorEvent(_ event: LidMuteEvent) {
+        events.insert(event, at: 0)
+        if events.count > 5_000 {
+            events.removeLast(events.count - 5_000)
+        }
         refresh()
     }
 
@@ -387,6 +461,16 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
     }
 
+    private func startChromeObservationTimerIfReady() {
+        guard lifecycleStateProvider.state == .ready,
+              !isShuttingDown,
+              inboxTimer == nil else { return }
+        inboxTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.pollChromeInbox() }
+        }
+        pollChromeInbox()
+    }
+
     private func resolveChromeExtensionPath() {
         // Production: inside app bundle
         let bundlePath = Bundle.main.bundleURL
@@ -406,11 +490,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             return
         }
         chromeExtensionPath = "LidMute.app/Contents/Resources/ChromeExtension"
-    }
-
-    private var chromeManifestURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appending(path: "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.lidmute.nativehost.json")
     }
 
     private var chromePidURL: URL {
@@ -529,7 +608,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     private func refresh() {
-        events = (try? store.load())?.reversed() ?? []
         switch lifecycleState {
         case .recovering:
             statusText = "正在恢复内建扬声器安全状态"
@@ -567,6 +645,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 routeChangePending = false
                 await lifecycleCoordinator.receiveAudioRouteChanged()
                 lifecycleState = lifecycleCoordinator.state
+                startChromeObservationTimerIfReady()
                 if lifecycleState == .ready, !isShuttingDown {
                     await coordinator.receiveAudioRouteChanged()
                 }
@@ -601,6 +680,32 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             return "扬声器安全状态未知，守卫已阻止启动"
         case .noPendingRecovery, .restored:
             return "扬声器恢复已完成"
+        }
+    }
+
+    private static func timelineEvent(for record: ChromeInboxRecord) -> LidMuteEvent {
+        LidMuteEvent(
+            timestamp: record.acceptedAt,
+            kind: .chromeTabAudible,
+            detail: "\(record.evidence.title) · \(record.evidence.url)",
+            observationEventID: record.eventID,
+            chromeTab: record.evidence,
+            correlation: .browserObservedOnly
+        )
+    }
+
+    private static func storageFailureText(_ error: Error) -> String {
+        switch error {
+        case EventStoreError.corruptRecord:
+            return "观察记录损坏，未静默跳过"
+        case EventStoreError.permissionFailure, ChromeConsumeError.permissionFailure:
+            return "观察存储权限不足"
+        case EventStoreError.capacityFailure, ChromeConsumeError.capacityFailure:
+            return "观察存储空间不足"
+        case ChromeConsumeError.corruptRecord, ChromeConsumeError.corruptCursor:
+            return "Chrome 观察数据损坏，未静默跳过"
+        default:
+            return "观察存储失败：\(error.localizedDescription)"
         }
     }
 

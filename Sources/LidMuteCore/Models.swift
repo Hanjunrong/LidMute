@@ -157,6 +157,7 @@ public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
     public let sequence: UInt64
     public let kind: LidMuteEventKind
     public let detail: String
+    public let observationEventID: UUID?
     public let process: AudioProcess?
     public let chromeTab: ChromeTabEvidence?
     public let correlation: CorrelationStatus
@@ -167,6 +168,7 @@ public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
         sequence: UInt64 = 0,
         kind: LidMuteEventKind,
         detail: String,
+        observationEventID: UUID? = nil,
         process: AudioProcess? = nil,
         chromeTab: ChromeTabEvidence? = nil,
         correlation: CorrelationStatus = .notApplicable
@@ -176,6 +178,7 @@ public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
         self.sequence = sequence
         self.kind = kind
         self.detail = detail
+        self.observationEventID = observationEventID
         self.process = process
         self.chromeTab = chromeTab
         self.correlation = correlation
@@ -185,7 +188,15 @@ public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
 public protocol EventStoring: AnyObject, Sendable {
     func append(_ event: LidMuteEvent) throws
     func load() throws -> [LidMuteEvent]
+    func recent(limit: Int) throws -> [LidMuteEvent]
     func clear() throws
+}
+
+public extension EventStoring {
+    func recent(limit: Int) throws -> [LidMuteEvent] {
+        guard limit > 0 else { return [] }
+        return Array(try load().suffix(limit))
+    }
 }
 
 public protocol AudioProcessEvidenceProviding: AnyObject, Sendable {

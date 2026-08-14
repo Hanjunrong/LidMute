@@ -549,10 +549,11 @@ private struct ActivityTimeline: View {
                     .font(ControlCenterTypography.numericCaption)
                     .foregroundStyle(palette.secondaryText)
                 Button {
-                    model.clearLog()
+                    Task { await model.clearObservationData() }
                 } label: {
-                    Label("清空", systemImage: "trash")
+                    Label(model.isClearingObservationData ? "正在清空" : "清空", systemImage: "trash")
                 }
+                .disabled(model.isClearingObservationData)
                 .buttonStyle(
                     LiquidGlassButtonStyle(
                         tint: AmberVisualTheme.danger,
@@ -560,6 +561,12 @@ private struct ActivityTimeline: View {
                         shape: .capsule
                     )
                 )
+            }
+
+            if !model.storageStatusText.isEmpty {
+                Text(model.storageStatusText)
+                    .font(ControlCenterTypography.caption)
+                    .foregroundStyle(AmberVisualTheme.danger)
             }
 
             Group {

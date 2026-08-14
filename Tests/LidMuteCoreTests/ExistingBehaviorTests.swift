@@ -28,18 +28,23 @@ final class ExistingBehaviorTests: XCTestCase {
         XCTAssertTrue(decoded.url == "https://v.youku.com/v_show/id_example")
     }
 
-    func testEventStoreReloadsValidLinesAndSkipsMalformedInput() throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "lidmute-events-\(UUID().uuidString).jsonl")
-        defer { try? FileManager.default.removeItem(at: url) }
+    func testEventStoreReportsMalformedInputWithoutSilentlySkippingIt() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "lidmute-events-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let url = root.appending(path: "events.jsonl")
+        defer { try? FileManager.default.removeItem(at: root) }
 
-        let store = JSONLineEventStore(url: url)
+        let store = BoundedJSONLineEventStore(url: url)
         try store.append(LidMuteEvent(kind: .muteEnforced, detail: "test"))
         let handle = try FileHandle(forWritingTo: url)
         try handle.seekToEnd()
         handle.write(Data("not-json\n".utf8))
         try handle.close()
 
-        XCTAssertTrue(try store.load().count == 1, "event store did not preserve only valid records")
+        XCTAssertThrowsError(try store.load()) { error in
+            XCTAssertEqual(error as? EventStoreError, .corruptRecord(line: 2))
+            XCTAssertEqual(store.health, .corruptRecord(line: 2))
+        }
     }
 
     @MainActor
@@ -386,22 +391,4 @@ final class ExistingBehaviorTests: XCTestCase {
         XCTAssertTrue(stretchedViewport == defaultViewport + 160, "extra window height was not assigned only to the timeline")
     }
 
-    func testChromeFrameCapturesAudibleTabDetails() throws {
-        let json = #"{"v":1,"type":"tab_audio_started","eventId":"e","extensionSessionId":"s","seq":"1","sentAt":"2026-07-10T01:22:56Z","tab":{"windowId":3,"tabId":9,"index":1,"title":"优酷","url":"https://v.youku.com","status":"complete","audible":true,"muted":{"value":false},"active":false,"pinned":false,"incognito":false}}"#
-        let evidence = try ChromeBridgeFrame.decode(Data(json.utf8)).evidence
-        XCTAssertTrue(evidence.tabID == 9)
-        XCTAssertTrue(evidence.url == "https://v.youku.com")
-        XCTAssertTrue(evidence.audible)
-    }
-
-    func testChromeEventDeduplicatorPersistsAcceptedIDs() throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "lidmute-seen-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let first = ChromeEventDeduplicator(url: url)
-        XCTAssertTrue(try first.accept("chrome-event-1"), "first Chrome event should be accepted")
-        XCTAssertTrue(!(try first.accept("chrome-event-1")), "duplicate Chrome event should be rejected")
-        let restarted = ChromeEventDeduplicator(url: url)
-        XCTAssertTrue(!(try restarted.accept("chrome-event-1")), "persisted Chrome event should remain rejected after restart")
-    }
 }

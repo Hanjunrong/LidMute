@@ -14,7 +14,7 @@ let package = Package(
         .target(name: "LidMuteCore"),
         .testTarget(
             name: "LidMuteCoreTests",
-            dependencies: ["LidMuteCore"],
+            dependencies: ["LidMuteCore", "LidMuteApp"],
             path: "Tests/LidMuteCoreTests"
         ),
         .executableTarget(

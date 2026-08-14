@@ -27,6 +27,7 @@ public protocol ObservationLocking: Sendable {
 
 public protocol ObservationFileSystem: Sendable {
     func read(_ url: URL) throws -> Data
+    func read(_ url: URL, fromOffset offset: UInt64) throws -> Data
     func readLastCompleteLines(
         _ url: URL,
         maximumCount: Int,
@@ -39,6 +40,14 @@ public protocol ObservationFileSystem: Sendable {
     func ensurePrivateDirectory(_ url: URL) throws
     func truncate(_ url: URL) throws
     func removeIfPresent(_ url: URL) throws
+}
+
+public extension ObservationFileSystem {
+    func read(_ url: URL, fromOffset offset: UInt64) throws -> Data {
+        let data = try read(url)
+        guard offset < UInt64(data.count) else { return Data() }
+        return Data(data[Int(offset)...])
+    }
 }
 
 public struct ChromeInboxRecord: Codable, Equatable, Sendable {
@@ -64,6 +73,36 @@ public enum ChromeAcceptDisposition: Equatable, Sendable {
 public enum ObservationStoreError: Error, Equatable, Sendable {
     case retryablePersistenceFailure
     case corruptMetadata(String)
+}
+
+public enum ObservationClearCategory: String, Codable, Equatable, Sendable {
+    case events
+    case inbox
+    case deduplication
+    case cursor
+    case memory
+}
+
+public struct ObservationClearReport: Equatable, Sendable {
+    public let oldGeneration: UInt64
+    public let newGeneration: UInt64
+    public let failures: [ObservationClearCategory]
+
+    public init(
+        oldGeneration: UInt64,
+        newGeneration: UInt64,
+        failures: [ObservationClearCategory]
+    ) {
+        self.oldGeneration = oldGeneration
+        self.newGeneration = newGeneration
+        self.failures = failures
+    }
+
+    public var isComplete: Bool { failures.isEmpty }
+}
+
+public protocol ObservationClearing: AnyObject, Sendable {
+    func clearObservationData(inMemoryReset: () throws -> Void) throws -> ObservationClearReport
 }
 
 public final class InProcessObservationLock: ObservationLocking, @unchecked Sendable {
@@ -162,6 +201,39 @@ public struct POSIXObservationFileSystem: ObservationFileSystem, Sendable {
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             return Data()
         }
+    }
+
+    public func read(_ url: URL, fromOffset offset: UInt64) throws -> Data {
+        let descriptor = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { return Data() }
+            throw POSIXObservationError.current
+        }
+        defer { Darwin.close(descriptor) }
+
+        let endOffset = lseek(descriptor, 0, SEEK_END)
+        guard endOffset >= 0 else { throw POSIXObservationError.current }
+        guard offset < UInt64(endOffset) else { return Data() }
+        let byteCount = UInt64(endOffset) - offset
+        guard byteCount <= UInt64(Int.max) else { throw POSIXObservationError(code: EFBIG) }
+
+        var data = Data(count: Int(byteCount))
+        var bytesRead = 0
+        try data.withUnsafeMutableBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return }
+            while bytesRead < buffer.count {
+                let result = pread(
+                    descriptor,
+                    baseAddress.advanced(by: bytesRead),
+                    buffer.count - bytesRead,
+                    off_t(offset) + off_t(bytesRead)
+                )
+                if result < 0, errno == EINTR { continue }
+                guard result > 0 else { throw POSIXObservationError.current }
+                bytesRead += result
+            }
+        }
+        return data
     }
 
     public func readLastCompleteLines(
@@ -420,7 +492,74 @@ public final class ObservationStore: @unchecked Sendable {
     }
 
     public func withExclusiveLock<T>(_ body: () throws -> T) throws -> T {
-        try mapPersistenceErrors { try lock.withExclusiveLock(body) }
+        try lock.withExclusiveLock(body)
+    }
+
+    public func clearObservationData(
+        inMemoryReset: () throws -> Void
+    ) throws -> ObservationClearReport {
+        try mapPersistenceErrors {
+            try lock.withExclusiveLock {
+                let oldGeneration = try readGenerationWithoutLock()
+                guard oldGeneration < UInt64.max else {
+                    throw ObservationStoreError.corruptMetadata(paths.generation.lastPathComponent)
+                }
+                let newGeneration = oldGeneration + 1
+
+                try fileSystem.ensurePrivateDirectory(paths.root)
+                try fileSystem.atomicWrite(
+                    Data("\(newGeneration)\n".utf8),
+                    to: paths.generation,
+                    permissions: Int16(0o600)
+                )
+                try fileSystem.syncFile(paths.generation)
+                try fileSystem.syncDirectory(paths.root)
+
+                var failures: [ObservationClearCategory] = []
+                clearByTruncating(paths.events, category: .events, failures: &failures)
+                clearByTruncating(paths.inbox, category: .inbox, failures: &failures)
+                clearByRemoving(paths.dedup, category: .deduplication, failures: &failures)
+                clearByRemoving(paths.cursor, category: .cursor, failures: &failures)
+                do {
+                    try inMemoryReset()
+                } catch {
+                    failures.append(.memory)
+                }
+
+                return ObservationClearReport(
+                    oldGeneration: oldGeneration,
+                    newGeneration: newGeneration,
+                    failures: failures
+                )
+            }
+        }
+    }
+
+    private func clearByTruncating(
+        _ url: URL,
+        category: ObservationClearCategory,
+        failures: inout [ObservationClearCategory]
+    ) {
+        do {
+            try fileSystem.truncate(url)
+            try fileSystem.syncFile(url)
+            try fileSystem.syncDirectory(paths.root)
+        } catch {
+            failures.append(category)
+        }
+    }
+
+    private func clearByRemoving(
+        _ url: URL,
+        category: ObservationClearCategory,
+        failures: inout [ObservationClearCategory]
+    ) {
+        do {
+            try fileSystem.removeIfPresent(url)
+            try fileSystem.syncDirectory(paths.root)
+        } catch {
+            failures.append(category)
+        }
     }
 
     private func readGenerationWithoutLock() throws -> UInt64 {
@@ -519,6 +658,7 @@ public final class ObservationStore: @unchecked Sendable {
 }
 
 extension ObservationStore: ChromeFrameAccepting {}
+extension ObservationStore: ObservationClearing {}
 
 struct POSIXObservationError: Error, Sendable {
     let code: Int32

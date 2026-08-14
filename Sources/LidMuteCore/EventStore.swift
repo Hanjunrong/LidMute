@@ -18,10 +18,12 @@ public enum EventStoreError: Error, Equatable {
 public struct EventStoreAppendResult: Sendable {
     public let appended: LidMuteEvent
     public let evictedCount: Int
+    public let wasInserted: Bool
 
-    public init(appended: LidMuteEvent, evictedCount: Int) {
+    public init(appended: LidMuteEvent, evictedCount: Int, wasInserted: Bool = true) {
         self.appended = appended
         self.evictedCount = evictedCount
+        self.wasInserted = wasInserted
     }
 }
 
@@ -55,11 +57,23 @@ public final class BoundedJSONLineEventStore: EventStoring, @unchecked Sendable 
         try performStorageOperation {
             try lock.withExclusiveLock {
                 var events = try decodeEvents(fileSystem.read(url))
+                if let observationEventID = event.observationEventID,
+                   events.contains(where: { $0.observationEventID == observationEventID }) {
+                    return EventStoreAppendResult(
+                        appended: event,
+                        evictedCount: 0,
+                        wasInserted: false
+                    )
+                }
                 events.append(event)
                 let evictedCount = max(0, events.count - maximumCount)
                 let retained = maximumCount == 0 ? [] : Array(events.suffix(maximumCount))
                 try persist(retained)
-                return EventStoreAppendResult(appended: event, evictedCount: evictedCount)
+                return EventStoreAppendResult(
+                    appended: event,
+                    evictedCount: evictedCount,
+                    wasInserted: true
+                )
             }
         }
     }
@@ -169,47 +183,5 @@ private extension EventStoreError {
         case .capacityFailure: .capacityFailure
         case let .ioFailure(message): .ioFailure(message)
         }
-    }
-}
-
-public final class JSONLineEventStore: EventStoring, @unchecked Sendable {
-    private let url: URL
-    private let lock = NSLock()
-
-    public init(url: URL) {
-        self.url = url
-    }
-
-    public func append(_ event: LidMuteEvent) throws {
-        lock.lock()
-        defer { lock.unlock() }
-
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(JSONEncoder().encode(event))
-        handle.write(Data([0x0A]))
-    }
-
-    public func load() throws -> [LidMuteEvent] {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
-        return try String(contentsOf: url, encoding: .utf8)
-            .split(separator: "\n")
-            .compactMap { try? JSONDecoder().decode(LidMuteEvent.self, from: Data($0.utf8)) }
-    }
-
-    public func clear() throws {
-        lock.lock()
-        defer { lock.unlock() }
-        try FileManager.default.removeItem(at: url)
     }
 }
