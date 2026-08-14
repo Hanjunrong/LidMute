@@ -7,6 +7,7 @@ final class RecordingObservationFileSystem: ObservationFileSystem, @unchecked Se
     var failFileSync = false
     var ensureDirectoryError: Error?
     var failNextDedupWrite = false
+    var failNextDirectorySync = false
     private var files: [URL: Data] = [:]
 
     func read(_ url: URL) throws -> Data {
@@ -35,6 +36,10 @@ final class RecordingObservationFileSystem: ObservationFileSystem, @unchecked Se
 
     func syncDirectory(_ url: URL) throws {
         operations.append("fsync-dir:\(url.lastPathComponent)")
+        if failNextDirectorySync {
+            failNextDirectorySync = false
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
     }
 
     func ensurePrivateDirectory(_ url: URL) throws {
@@ -98,6 +103,22 @@ final class ObservationStoreAcceptanceTests: XCTestCase {
         XCTAssertEqual(try store.accept(normalFrame()), .duplicate(eventID))
         XCTAssertEqual(try store.readInboxRecords().map(\.eventID), [eventID])
         XCTAssertEqual(try store.acceptedEventIDs(), [eventID])
+        XCTAssertEqual(fs.operations.filter { $0 == "write:chrome-inbox.jsonl" }.count, 1)
+    }
+
+    func testRetryAfterDirectorySyncFailureRedrivesDurabilityBeforeDuplicate() throws {
+        let fs = RecordingObservationFileSystem()
+        fs.failNextDirectorySync = true
+        let paths = ObservationPaths(root: URL(fileURLWithPath: "/tmp/lidmute-store-recover-directory"))
+        let store = ObservationStore(paths: paths, fileSystem: fs, lock: InProcessObservationLock())
+
+        XCTAssertThrowsError(try store.accept(normalFrame())) { error in
+            XCTAssertEqual(error as? ObservationStoreError, .retryablePersistenceFailure)
+        }
+        XCTAssertEqual(try store.accept(normalFrame()), .duplicate(eventID))
+        XCTAssertEqual(fs.operations.filter { $0 == "fsync:chrome-inbox.jsonl" }.count, 2)
+        XCTAssertEqual(fs.operations.filter { $0 == "fsync:chrome-dedup.json" }.count, 2)
+        XCTAssertEqual(fs.operations.filter { $0 == "fsync-dir:lidmute-store-recover-directory" }.count, 2)
         XCTAssertEqual(fs.operations.filter { $0 == "write:chrome-inbox.jsonl" }.count, 1)
     }
 

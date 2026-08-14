@@ -265,7 +265,13 @@ public final class ObservationStore: @unchecked Sendable {
                 }
 
                 var acceptedIDs = try readAcceptedEventIDsWithoutLock()
-                guard !acceptedIDs.contains(frame.eventID) else {
+                if acceptedIDs.contains(frame.eventID) {
+                    guard try readInboxRecordsWithoutLock().contains(where: { $0.eventID == frame.eventID }) else {
+                        throw ObservationStoreError.corruptMetadata(paths.dedup.lastPathComponent)
+                    }
+                    try fileSystem.syncFile(paths.inbox)
+                    try fileSystem.syncFile(paths.dedup)
+                    try fileSystem.syncDirectory(paths.root)
                     return .duplicate(frame.eventID)
                 }
 
