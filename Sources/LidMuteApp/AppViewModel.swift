@@ -260,7 +260,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil,
         heartbeatStore: (any ChromeHostHeartbeatPersisting)? = nil,
         acceptanceStore: (any ChromeHostAcceptancePersisting)? = nil,
-        chromeRegistration: (any ChromeHostRegistering)? = nil,
+        chromeRegistration: (any ChromeHostRegistering & ChromeManifestInspecting)? = nil,
         diagnosticSink: (any LidMuteDiagnosticSinking)? = nil,
         audioPoller: (any AudioProcessPolling)? = nil,
         uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
@@ -295,7 +295,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         self.healthIOCollector = healthIOCollector ?? DefaultAppHealthIOCollector(
             heartbeatStore: resolvedHeartbeatStore,
             acceptanceStore: resolvedAcceptanceStore,
-            chromeRegistration: resolvedChromeRegistration as any ChromeManifestInspecting
+            chromeRegistration: resolvedChromeRegistration
         )
 
         let paths = ObservationPaths(root: support)
@@ -673,12 +673,14 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                         try await Task.detached(priority: .utility) {
                             try consumer.acknowledgeDelivery(deliveryID)
                         }.value
-                        guard !model.isShuttingDown,
+                        guard model.lifecycleStateProvider.state == .ready,
+                              !model.isShuttingDown,
                               !model.isClearingObservationData,
                               model.observationEpoch == pollEpoch else { return }
                         model.setOperationalStorageHealth(.healthy, source: .acknowledgement)
                     } catch {
-                        guard !model.isShuttingDown,
+                        guard model.lifecycleStateProvider.state == .ready,
+                              !model.isShuttingDown,
                               !model.isClearingObservationData,
                               model.observationEpoch == pollEpoch else { return }
                         model.setOperationalStorageFailure(error, source: .acknowledgement)

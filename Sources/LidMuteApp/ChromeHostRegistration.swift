@@ -18,11 +18,12 @@ protocol ChromeManifestInspecting: Sendable {
 }
 
 @MainActor
-protocol ChromeHostRegistering: ChromeManifestInspecting {
+protocol ChromeHostRegistering: Sendable {
+    func inspect(expectedHostPath: URL) -> ChromeManifestInspection
     func repair(expectedHostPath: URL) throws
 }
 
-struct ChromeHostRegistration: ChromeHostRegistering, @unchecked Sendable {
+struct ChromeHostRegistration: ChromeHostRegistering, ChromeManifestInspecting, @unchecked Sendable {
     nonisolated private let manifestURL: URL
     nonisolated private let originURL: URL
     nonisolated(unsafe) private let fileManager: FileManager

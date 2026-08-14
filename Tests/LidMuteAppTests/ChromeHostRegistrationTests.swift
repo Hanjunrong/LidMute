@@ -37,6 +37,34 @@ private final class ChromeRegistrationFixture {
     }
 }
 
+private final class MainActorRegistrationContractProbe: ChromeHostRegistering, @unchecked Sendable {
+    nonisolated private let lock = NSLock()
+    nonisolated(unsafe) private var inspectedOnMainThread = false
+
+    nonisolated var didInspectOnMainThread: Bool { lock.withLock { inspectedOnMainThread } }
+
+    nonisolated func inspect(expectedHostPath _: URL) -> ChromeManifestInspection {
+        lock.withLock { inspectedOnMainThread = Thread.isMainThread }
+        return .current
+    }
+
+    @MainActor
+    func repair(expectedHostPath _: URL) throws {}
+}
+
+@Test
+func chromeHostRegisteringInspectionHopsToMainActor() async {
+    let probe = MainActorRegistrationContractProbe()
+    let registration: any ChromeHostRegistering = probe
+
+    let inspection = await Task.detached {
+        await registration.inspect(expectedHostPath: URL(filePath: "/expected/native-host"))
+    }.value
+
+    #expect(inspection == .current)
+    #expect(probe.didInspectOnMainThread)
+}
+
 @MainActor @Test func movedBundleIsDetectedAndRepairPreservesRegisteredOrigin() throws {
     let fixture = try ChromeRegistrationFixture(
         registeredHostPath: "/Users/test/Downloads/LidMute.app/Contents/MacOS/LidMuteNativeHost",

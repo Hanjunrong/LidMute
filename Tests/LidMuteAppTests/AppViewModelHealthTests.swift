@@ -100,7 +100,7 @@ private final class MutableUptime: @unchecked Sendable {
     func set(_ value: TimeInterval) { lock.withLock { storedValue = value } }
 }
 
-private final class MutableRegistration: ChromeHostRegistering, @unchecked Sendable {
+private final class MutableRegistration: ChromeHostRegistering, ChromeManifestInspecting, @unchecked Sendable {
     nonisolated(unsafe) var inspection: ChromeManifestInspection
     private(set) var repairCalls = 0
     init(_ inspection: ChromeManifestInspection) { self.inspection = inspection }

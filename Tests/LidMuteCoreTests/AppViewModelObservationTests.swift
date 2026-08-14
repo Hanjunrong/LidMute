@@ -1132,6 +1132,42 @@ func staleAcknowledgementCannotPublishSuccessOrFailureHealthAfterClear(
 }
 
 @MainActor
+@Test(arguments: [false, true])
+func acknowledgementCannotPublishSuccessOrFailureHealthAfterLifecycleLeavesReady(
+    acknowledgementSucceeds: Bool
+) async throws {
+    let consumer = PausingAcknowledgementHealthConsumer(
+        record: appRecord(),
+        staleAcknowledgementSucceeds: acknowledgementSucceeds
+    )
+    let harness = try AppViewModelHarness(
+        lifecycle: .ready,
+        inboxConsumer: consumer,
+        observationPipelineCoordinator: OutcomeChromeEvidenceCoordinator(result: .protected)
+    )
+    if acknowledgementSucceeds {
+        await harness.model.pollChromeInbox()
+        #expect(harness.model.health.storage == .permissionFailed)
+    }
+
+    let poll = Task { @MainActor in await harness.model.pollChromeInbox() }
+    for _ in 0..<100 where !consumer.isAcknowledgementPaused { await Task.yield() }
+    #expect(consumer.isAcknowledgementPaused)
+
+    harness.lifecycle.state = .recovering
+    consumer.releaseAcknowledgement()
+    await poll.value
+
+    if acknowledgementSucceeds {
+        #expect(harness.model.health.storage == .permissionFailed)
+        #expect(!harness.model.storageStatusText.isEmpty)
+    } else {
+        #expect(harness.model.health.storage == .healthy)
+        #expect(harness.model.storageStatusText.isEmpty)
+    }
+}
+
+@MainActor
 @Test
 func routeProtectionContinuesDuringSlowObservationClearWithoutDuplicateAction() async throws {
     let root = FileManager.default.temporaryDirectory

@@ -64,6 +64,33 @@ All Swift commands used isolated `/tmp` module caches and `--disable-sandbox` af
 - Privacy/source scans: exit 0; no `kill(...)` liveness inference, one Logger construction confined to the typed adapter, exact `heartbeatInterval: 2`, exact `ttl: 6`, `ProcessInfo.processInfo.systemUptime`, and unchanged zero card spacing.
 - `git diff --check`: exit 0.
 
+## Formal review fix round 3 — lifecycle ACK fence and registration isolation
+
+### Important: acknowledgement resume requires ready lifecycle
+
+- RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review3-ack-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review3-ack-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review3-ack-red-build --filter acknowledgementCannotPublishSuccessOrFailureHealthAfterLifecycleLeavesReady`
+- RED result: exit 1; both parameter cases failed. After the suspended acknowledgement resumed while lifecycle was recovering, failure published `.permissionFailed` over healthy state, and success cleared a deliberately seeded `.permissionFailed` state.
+- GREEN command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review3-green3-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review3-green3-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review3-green3-build --filter 'acknowledgementCannotPublishSuccessOrFailureHealthAfterLifecycleLeavesReady|chromeHostRegisteringInspectionHopsToMainActor'`
+- GREEN result: exit 0; 2 test functions / 3 parameterized executions passed. Both post-await acknowledgement branches now require `lifecycleStateProvider.state == .ready` before publishing health.
+
+### Important: stable registration inspection is MainActor-isolated
+
+- First RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review3-isolation-red-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review3-isolation-red-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review3-isolation-red-build --filter chromeHostRegisteringInspectionHopsToMainActor`
+- First RED result: exit 1 at compile time; a naturally MainActor-isolated conformer could not satisfy the inherited nonisolated `ChromeManifestInspecting.inspect` requirement. This established the inherited-interface leak but also showed that the intended concrete nonisolated dual witness required a different contract probe.
+- Behavior RED command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review3-isolation-red2-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review3-isolation-red2-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review3-isolation-red2-build --filter chromeHostRegisteringInspectionHopsToMainActor`
+- Behavior RED result: exit 1; invoking the nonisolated witness through `any ChromeHostRegistering` from detached work ran off the main thread, and the compiler warned that the `await` contained no asynchronous operation.
+- GREEN result: included in the combined GREEN command above. `ChromeManifestInspecting` remains a separate nonisolated internal capability for detached health collection. `ChromeHostRegistering` independently declares its MainActor `inspect` and `repair` requirements, while `ChromeHostRegistration` conforms to both with the same nonisolated inspect implementation. The runtime contract test proves a call through the stable registration existential hops to MainActor.
+- Focused suites command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review3-focused-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review3-focused-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review3-focused-build --filter 'AppViewModelObservationTests|AppViewModelHealthTests|ChromeHostRegistrationTests'`
+- Focused suites result: exit 0; 54 Swift Testing functions passed with 0 failures.
+- Full Swift command: `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review3-full-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review3-full-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review3-full-build`; exit 0, 125 XCTest cases plus 88 Swift Testing functions passed with 0 failures.
+- Node command: `node --test ChromeExtension/service-worker.test.mjs`; exit 0, 17 passed, 0 failed.
+- Visual command: `bash Scripts/check-visual-principles.sh`; exit 0 with `PASS visual principle source checks`.
+- Bundle command: `LIDMUTE_SCRATCH_PATH=/tmp/lidmute-task10-review3-bundle-build zsh Scripts/make-app-bundle.sh`; exit 0, `dist/LidMute.app` created and its ad-hoc signature replaced.
+- First smoke attempt: `zsh Scripts/run-smoke-check.sh` exited 1 only because the pre-existing external-`flock` test timed out waiting two seconds after terminating its helper; the same test had passed in the immediately preceding isolated full suite. Focused recheck `CLANG_MODULE_CACHE_PATH=/tmp/lidmute-task10-review3-flock-recheck-clang SWIFTPM_MODULECACHE_OVERRIDE=/tmp/lidmute-task10-review3-flock-recheck-swiftpm swift test --disable-sandbox --scratch-path /tmp/lidmute-task10-review3-flock-recheck-build --filter heartbeatWriteWaitsForAnExternalFlockHolder` exited 0 in 0.231 seconds, confirming a transient helper/process timing failure rather than a changed behavior.
+- Final smoke command: `zsh Scripts/run-smoke-check.sh`; exit 0 after 125 XCTest cases, 88 Swift Testing functions, 17 Node tests, visual checks, and app-bundle builds; final line `PASS LidMute smoke check`.
+- Privacy/source scans and `git diff --check`: exit 0; all prior invariants remain intact.
+- Fresh independent scoped review: `APPROVED`, no findings. The reviewer independently passed 4 focused tests / 6 parameterized executions, confirmed both ACK branches recheck authoritative lifecycle readiness, the stable registration interface is MainActor-isolated while detached inspection retains its separate nonisolated seam, the diff is limited to the six stated files plus this report, and all preserved constraints remain intact with no Task 11 edits.
+
 ## Formal review fix round 2 — stale acknowledgement and single-source presentation
 
 ### Important: stale acknowledgement health publication
