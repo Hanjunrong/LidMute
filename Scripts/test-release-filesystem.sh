@@ -25,8 +25,10 @@ wait_bounded() {
     if ! kill -0 "$pid" 2>/dev/null; then
       if wait "$pid"; then
         return 0
+      else
+        rc="$?"
+        return "$rc"
       fi
-      return $?
     fi
     sleep 0.01
   done
@@ -35,6 +37,20 @@ wait_bounded() {
   print -u2 "$label did not exit within bounded wait"
   return 1
 }
+
+(exit 23) &
+nonzero_pid="$!"
+if wait_bounded "$nonzero_pid" "intentional nonzero child"; then
+  print -u2 "wait_bounded swallowed an intentional child failure"
+  exit 1
+else
+  nonzero_status="$?"
+fi
+[[ "$nonzero_status" == 23 ]] || {
+  print -u2 "wait_bounded returned $nonzero_status instead of child status 23"
+  exit 1
+}
+print "PASS bounded wait propagates child failures"
 
 mkdir -p "$fixture/repo/dist" "$fixture/external"
 print 'preserve' > "$fixture/external/sentinel"
@@ -88,9 +104,19 @@ exec {second_ctl}<>"$second_fifo"
 swift "$helper" with-dist "$fixture/repo" /bin/zsh -c '
   set -euo pipefail
   helper="$1"
-  swift "$helper" hold-lock "$LIDMUTE_DIST_FD"
+  exec swift "$helper" hold-lock "$LIDMUTE_DIST_FD"
 ' zsh "$helper" <&$holder_ctl >"$holder_output" 2>"$holder_error" &
 holder_pid="$!"
+
+for ((i = 0; i < 200; i++)); do
+  grep -Fqx WAITING "$holder_output" 2>/dev/null && break
+  if ! kill -0 "$holder_pid" 2>/dev/null; then
+    cat "$holder_error" >&2
+    exit 1
+  fi
+  sleep 0.01
+done
+grep -Fqx WAITING "$holder_output"
 
 for ((i = 0; i < 200; i++)); do
   grep -Fqx LOCKED "$holder_output" 2>/dev/null && break
@@ -105,10 +131,19 @@ grep -Fqx LOCKED "$holder_output"
 swift "$helper" with-dist "$fixture/repo" /bin/zsh -c '
   set -euo pipefail
   helper="$1"
-  swift "$helper" hold-lock "$LIDMUTE_DIST_FD"
-  print SECOND-LOCKED
+  exec swift "$helper" hold-lock "$LIDMUTE_DIST_FD"
 ' zsh "$helper" <&$second_ctl >"$second_output" 2>"$second_error" &
 second_pid="$!"
+
+for ((i = 0; i < 100; i++)); do
+  grep -Fqx WAITING "$second_output" 2>/dev/null && break
+  if ! kill -0 "$second_pid" 2>/dev/null; then
+    cat "$second_error" >&2
+    exit 1
+  fi
+  sleep 0.01
+done
+grep -Fqx WAITING "$second_output"
 
 for ((i = 0; i < 100; i++)); do
   if grep -Fqx LOCKED "$second_output" 2>/dev/null; then
@@ -132,7 +167,7 @@ for ((i = 0; i < 200; i++)); do
   sleep 0.01
 done
 [[ -z "$holder_pid" ]] || {
-  kill "$holder_pid" 2>/dev/null || true
+  kill -KILL "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
   print -u2 "holder did not release within bounded wait"
   exit 1
@@ -157,7 +192,7 @@ for ((i = 0; i < 200; i++)); do
   sleep 0.01
 done
 [[ -z "$second_pid" ]] || {
-  kill "$second_pid" 2>/dev/null || true
+  kill -KILL "$second_pid" 2>/dev/null || true
   wait "$second_pid" 2>/dev/null || true
   print -u2 "second holder did not exit within bounded wait"
   exit 1
@@ -190,8 +225,10 @@ swift "$helper" with-dist "$fixture/repo" /bin/zsh -c '
       if ! kill -0 "$pid" 2>/dev/null; then
         if wait "$pid"; then
           return 0
+        else
+          rc="$?"
+          return "$rc"
         fi
-        return $?
       fi
       sleep 0.01
     done

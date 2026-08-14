@@ -255,6 +255,8 @@ private func openInstallLock(distFD: Int32) throws -> Int32 {
 private func holdLock(distFD: Int32) throws {
     let lockFD = try openInstallLock(distFD: distFD)
     defer { close(lockFD) }
+    print("WAITING")
+    fflush(stdout)
     if flock(lockFD, LOCK_EX) != 0 { throw errnoMessage("flock install lock") }
     print("LOCKED")
     fflush(stdout)
