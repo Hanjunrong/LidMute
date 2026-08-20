@@ -554,7 +554,7 @@ private struct ActivityTimeline: View {
             HStack {
                 CardTitle(
                     title: "活动时间线",
-                    subtitle: "永久保存在本机",
+                    subtitle: "永久保存在本机；普通标签页保存完整 URL（可能含搜索词、标识符或 token）",
                     systemImage: "clock.arrow.circlepath",
                     tint: AmberVisualTheme.mistBlue
                 )

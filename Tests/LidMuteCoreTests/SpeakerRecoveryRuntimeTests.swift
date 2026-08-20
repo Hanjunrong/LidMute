@@ -103,16 +103,14 @@ final class SpeakerRecoveryRuntimeTests: XCTestCase {
     }
 
     // This fails if a no-mute device raises volume without an equivalent verified silence barrier.
-    func testFallbackRecoveryKeepsVolumeZeroAndRetainsJournal() async {
+    func testFallbackRecoveryRestoresOriginalVolumeAndClearsJournal() async {
         let fallbackState = AudioDeviceState(
             muted: false,
             volume: 0.72,
             usedVolumeFallback: true
         )
         let store = MemorySpeakerRecoveryStore.withPendingFixture(originalState: fallbackState)
-        let audio = ScriptedAudioController(
-            readBack: .init(muted: false, volume: 0, usedVolumeFallback: true)
-        )
+        let audio = ScriptedAudioController(readBack: fallbackState)
         audio.supportsMute = false
         let runtime = SpeakerRecoveryRuntime(
             audio: audio,
@@ -122,25 +120,20 @@ final class SpeakerRecoveryRuntimeTests: XCTestCase {
 
         let outcome = await runtime.recoverPending()
 
-        XCTAssertEqual(outcome, .failedButVerifiedSilent)
-        XCTAssertEqual(audio.operations.filter { $0.hasPrefix("writeVolume:") }, ["writeVolume:0.0"])
-        guard case let .snapshot(snapshot) = store.loadResult else {
-            return XCTFail("fallback recovery removed its journal")
-        }
-        XCTAssertEqual(snapshot.stage, .finalizingRestore)
+        XCTAssertEqual(outcome, .restored)
+        XCTAssertEqual(audio.operations.filter { $0.hasPrefix("writeVolume:") }, ["writeVolume:0.72"])
+        XCTAssertEqual(store.loadResult, .none)
     }
 
     // This fails if fallback provenance is ignored after writable mute becomes available.
-    func testFallbackSnapshotStaysVolumeZeroWhenMuteCapabilityAppears() async {
+    func testFallbackSnapshotRestoresVolumeWhenMuteCapabilityAppears() async {
         let fallbackState = AudioDeviceState(
             muted: false,
             volume: 0.72,
             usedVolumeFallback: true
         )
         let store = MemorySpeakerRecoveryStore.withPendingFixture(originalState: fallbackState)
-        let audio = ScriptedAudioController(
-            readBack: .init(muted: false, volume: 0, usedVolumeFallback: true)
-        )
+        let audio = ScriptedAudioController(readBack: fallbackState)
         audio.supportsMute = true
         let runtime = SpeakerRecoveryRuntime(
             audio: audio,
@@ -150,13 +143,10 @@ final class SpeakerRecoveryRuntimeTests: XCTestCase {
 
         let outcome = await runtime.recoverPending()
 
-        XCTAssertEqual(outcome, .failedButVerifiedSilent)
-        XCTAssertEqual(audio.operations.filter { $0.hasPrefix("writeVolume:") }, ["writeVolume:0.0"])
-        XCTAssertFalse(audio.operations.contains("writeMute:false"))
-        guard case let .snapshot(snapshot) = store.loadResult else {
-            return XCTFail("fallback recovery removed its journal")
-        }
-        XCTAssertEqual(snapshot.stage, .finalizingRestore)
+        XCTAssertEqual(outcome, .restored)
+        XCTAssertEqual(audio.operations.filter { $0.hasPrefix("writeVolume:") }, ["writeVolume:0.72"])
+        XCTAssertTrue(audio.operations.contains("writeMute:false"))
+        XCTAssertEqual(store.loadResult, .none)
     }
 
     // This fails if recovery claims safety after the final readback cannot establish silence.

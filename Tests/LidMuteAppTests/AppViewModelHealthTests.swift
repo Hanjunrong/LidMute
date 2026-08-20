@@ -495,15 +495,17 @@ private final class AppHealthFixture {
     #expect(fixture.registration.repairCalls == 1)
 }
 
-@MainActor @Test func coreAudioFailureIsNotProjectedAsNoOutput() {
+@MainActor @Test func coreAudioFailureIsNotProjectedAsNoOutput() async {
     let fixture = AppHealthFixture(audioPoll: .failure(.queryFailed))
     let model = fixture.makeViewModel()
     model.pollAudioProcesses()
+    await Task.yield()
+    await Task.yield()
     #expect(model.health.coreAudio == .queryFailed)
     #expect(fixture.diagnostics.events.contains(.coreAudioQueryFailed))
 }
 
-@MainActor @Test func audioFailurePreservesLastKnownProcessSnapshot() {
+@MainActor @Test func audioFailurePreservesLastKnownProcessSnapshot() async {
     let fixture = AppHealthFixture(audioPoll: .failure(.queryFailed))
     let model = fixture.makeViewModel()
     model.receiveAudioPollResult(.success([AudioProcess(
@@ -515,6 +517,8 @@ private final class AppHealthFixture {
         isOutputActive: true
     )]))
     model.pollAudioProcesses()
+    await Task.yield()
+    await Task.yield()
     #expect(model.currentAudioProcesses.map(\.pid) == [7])
     #expect(model.health.coreAudio == .queryFailed)
 }

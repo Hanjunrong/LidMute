@@ -25,7 +25,7 @@ enum AudioQueryFailure: Error, Equatable {
     case queryFailed
 }
 
-protocol AudioProcessPolling {
+protocol AudioProcessPolling: Sendable {
     func pollAudioProcesses() -> Result<[AudioProcess], AudioQueryFailure>
 }
 
@@ -357,6 +357,9 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         coordinator.onEvent = { [weak self] event in self?.receiveCoordinatorEvent(event) }
         coordinator.onStorageHealth = { [weak self] health in
             self?.receiveCoordinatorStorageHealth(health)
+        }
+        coordinator.onRecoveryOutcome = { [weak self] outcome in
+            self?.setRecoveryHealth(AppHealthMapper.recovery(outcome))
         }
         do {
             events = Array(try store.recent(limit: 5_000).reversed())
@@ -722,7 +725,14 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     func pollAudioProcesses() {
         guard lifecycleState == .ready, !isShuttingDown else { return }
-        receiveAudioPollResult(audioPoller.pollAudioProcesses())
+        let poller = audioPoller
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                poller.pollAudioProcesses()
+            }.value
+            guard let self, self.lifecycleState == .ready, !self.isShuttingDown else { return }
+            self.receiveAudioPollResult(result)
+        }
     }
 
     func receiveAudioPollResult(_ result: Result<[AudioProcess], AudioQueryFailure>) {
@@ -974,9 +984,11 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
         do {
             try FileManager.default.createDirectory(at: applicationSupport, withIntermediateDirectories: true)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: applicationSupport.path)
 
             // Write origin file
             try origin.write(to: chromeOriginURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: chromeOriginURL.path)
 
             // Find native host path
             let hostPath = findNativeHostPath()

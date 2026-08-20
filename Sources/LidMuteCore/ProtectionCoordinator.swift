@@ -11,6 +11,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     public private(set) var latestChromeEvidence: ChromeTabEvidence?
     public var onEvent: ((LidMuteEvent) -> Void)?
     public var onStorageHealth: ((ObservationStorageHealth) -> Void)?
+    public var onRecoveryOutcome: ((SpeakerRecoveryOutcome) -> Void)?
 
     private let protection: Protection
     private let processEvidence: any AudioProcessEvidenceProviding
@@ -186,6 +187,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         }
         let outcome = await protection.apply(prepared.action)
         complete(prepared.completion, outcome: outcome)
+        onRecoveryOutcome?(outcome)
         enqueueBufferedObservationEvents(generation: observationGeneration)
         return ProtectionProcessingResult(
             outcome: outcome,
@@ -305,7 +307,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     }
 
     private func prepareAudioSnapshot(_ processes: [AudioProcess]) -> PreparedProtectionAction? {
-        guard isEnabled, !activeSources.isEmpty else { return nil }
+        guard isEnabled, !activeSources.isEmpty, state == .protecting else { return nil }
         let active = processes.filter(\.isOutputActive)
         let currentPIDs = Set(active.map(\.pid))
         let newlyActive = active.filter { !activeOutputPIDs.contains($0.pid) }
@@ -333,19 +335,9 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     ) -> PreparedProtectionAction? {
         guard isEnabled else { return nil }
         latestChromeEvidence = evidence
-        let chromeProcess: AudioProcess?
-        do {
-            chromeProcess = try processEvidence.activeOutputProcesses().first {
-                $0.isOutputActive && (
-                    $0.bundleID?.localizedCaseInsensitiveContains("chrome") == true ||
-                    $0.name.localizedCaseInsensitiveContains("chrome")
-                )
-            }
-        } catch {
-            chromeProcess = nil
-            record(.error, "无法读取系统音频进程：\(error.localizedDescription)")
-        }
-        let correlation: CorrelationStatus = chromeProcess == nil ? .browserObservedOnly : .systemMatched
+        // Observation must not synchronously block the safety predecessor.
+        // CoreAudio polling is owned by AppViewModel and delivered as snapshots.
+        let correlation: CorrelationStatus = .browserObservedOnly
         let action: SpeakerProtectionAction
         if ensuringProtection {
             guard !activeSources.isEmpty else { return nil }
@@ -648,6 +640,7 @@ extension ProtectionCoordinator where Protection: SynchronousSpeakerProtectionAp
         guard let prepared = prepare(input) else { return .noPendingRecovery }
         let outcome = protection.applySynchronously(prepared.action)
         complete(prepared.completion, outcome: outcome)
+        onRecoveryOutcome?(outcome)
         return outcome
     }
 }
