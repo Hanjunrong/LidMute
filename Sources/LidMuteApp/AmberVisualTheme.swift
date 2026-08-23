@@ -36,55 +36,55 @@ enum ControlCenterTypography {
 }
 
 enum AmberVisualTheme {
-    static let amber = Color(red: 0.91, green: 0.47, blue: 0.17)
-    static let amberSoft = Color(red: 0.96, green: 0.72, blue: 0.46)
-    static let seaGlass = Color(red: 0.18, green: 0.58, blue: 0.56)
-    static let mistBlue = Color(red: 0.45, green: 0.68, blue: 0.75)
-    static let danger = Color(red: 0.78, green: 0.30, blue: 0.24)
+    static let amber = Color(red: 0.25, green: 0.43, blue: 0.32)
+    static let amberSoft = Color(red: 0.46, green: 0.58, blue: 0.50)
+    static let seaGlass = Color(red: 0.25, green: 0.43, blue: 0.32)
+    static let mistBlue = Color(red: 0.47, green: 0.47, blue: 0.45)
+    static let danger = Color(red: 0.72, green: 0.30, blue: 0.26)
 
     static func palette(for colorScheme: ColorScheme) -> AmberThemePalette {
         switch colorScheme {
         case .dark:
             return AmberThemePalette(
-                canvas: Color(red: 0.055, green: 0.075, blue: 0.085),
-                atmosphereStart: Color(red: 0.075, green: 0.105, blue: 0.115),
-                atmosphereMiddle: Color(red: 0.075, green: 0.145, blue: 0.155),
-                atmosphereEnd: Color(red: 0.125, green: 0.095, blue: 0.075),
-                amberGlow: amberSoft.opacity(0.18),
-                seaGlassGlow: seaGlass.opacity(0.18),
-                mistGlow: mistBlue.opacity(0.13),
-                surfacePrimary: Color(red: 0.16, green: 0.20, blue: 0.21).opacity(0.68),
-                surfaceSecondary: Color(red: 0.12, green: 0.17, blue: 0.18).opacity(0.58),
-                surfaceTertiary: Color(red: 0.09, green: 0.13, blue: 0.15).opacity(0.52),
-                border: Color.white.opacity(0.22),
-                glassHighlight: Color.white.opacity(0.46),
-                cardShadow: Color.black.opacity(0.34),
-                primaryText: .white,
-                secondaryText: Color.white.opacity(0.76),
-                tertiaryText: Color.white.opacity(0.58),
-                controlFill: Color.white.opacity(0.10),
-                disabledFill: Color.white.opacity(0.055)
+                canvas: .clear,
+                atmosphereStart: .clear,
+                atmosphereMiddle: .clear,
+                atmosphereEnd: .clear,
+                amberGlow: .clear,
+                seaGlassGlow: .clear,
+                mistGlow: .clear,
+                surfacePrimary: Color.white.opacity(0.13),
+                surfaceSecondary: Color.white.opacity(0.09),
+                surfaceTertiary: Color.white.opacity(0.07),
+                border: Color.white.opacity(0.16),
+                glassHighlight: Color.white.opacity(0.32),
+                cardShadow: Color(red: 0.05, green: 0.05, blue: 0.045).opacity(0.22),
+                primaryText: Color(red: 0.950, green: 0.950, blue: 0.940),
+                secondaryText: Color(red: 0.680, green: 0.680, blue: 0.660),
+                tertiaryText: Color(red: 0.500, green: 0.500, blue: 0.480),
+                controlFill: Color.white.opacity(0.08),
+                disabledFill: Color.white.opacity(0.035)
             )
         default:
             return AmberThemePalette(
-                canvas: Color(red: 0.93, green: 0.92, blue: 0.89),
-                atmosphereStart: Color(red: 0.94, green: 0.89, blue: 0.81),
-                atmosphereMiddle: Color(red: 0.82, green: 0.89, blue: 0.88),
-                atmosphereEnd: Color(red: 0.84, green: 0.88, blue: 0.91),
-                amberGlow: amberSoft.opacity(0.28),
-                seaGlassGlow: seaGlass.opacity(0.21),
-                mistGlow: mistBlue.opacity(0.20),
-                surfacePrimary: Color.white.opacity(0.70),
-                surfaceSecondary: Color.white.opacity(0.58),
-                surfaceTertiary: Color.white.opacity(0.50),
-                border: Color.black.opacity(0.16),
-                glassHighlight: Color.white.opacity(0.94),
-                cardShadow: Color(red: 0.16, green: 0.24, blue: 0.27).opacity(0.16),
-                primaryText: Color.black.opacity(0.86),
-                secondaryText: Color.black.opacity(0.63),
-                tertiaryText: Color.black.opacity(0.48),
-                controlFill: Color.white.opacity(0.58),
-                disabledFill: Color.black.opacity(0.055)
+                canvas: .clear,
+                atmosphereStart: .clear,
+                atmosphereMiddle: .clear,
+                atmosphereEnd: .clear,
+                amberGlow: .clear,
+                seaGlassGlow: .clear,
+                mistGlow: .clear,
+                surfacePrimary: Color.white.opacity(0.30),
+                surfaceSecondary: Color.white.opacity(0.22),
+                surfaceTertiary: Color.white.opacity(0.18),
+                border: Color.white.opacity(0.54),
+                glassHighlight: Color.white.opacity(0.76),
+                cardShadow: Color(red: 0.18, green: 0.18, blue: 0.17).opacity(0.09),
+                primaryText: Color(red: 0.150, green: 0.150, blue: 0.140),
+                secondaryText: Color(red: 0.420, green: 0.420, blue: 0.400),
+                tertiaryText: Color(red: 0.550, green: 0.550, blue: 0.530),
+                controlFill: Color.white.opacity(0.26),
+                disabledFill: Color.white.opacity(0.16)
             )
         }
     }
@@ -96,79 +96,16 @@ enum AuroraCardRole {
     case media
     case timeline
 
-    func gradient(palette: AmberThemePalette) -> LinearGradient {
-        let colors: [Color]
-        switch self {
-        case .hero:
-            colors = [
-                palette.surfacePrimary,
-                AmberVisualTheme.amberSoft.opacity(0.24),
-                AmberVisualTheme.seaGlass.opacity(0.15),
-            ]
-        case .standard:
-            colors = [
-                palette.surfaceSecondary,
-                AmberVisualTheme.mistBlue.opacity(0.10),
-                AmberVisualTheme.amberSoft.opacity(0.06),
-            ]
-        case .media:
-            colors = [
-                palette.surfacePrimary.opacity(0.88),
-                AmberVisualTheme.seaGlass.opacity(0.24),
-                AmberVisualTheme.mistBlue.opacity(0.14),
-            ]
-        case .timeline:
-            colors = [
-                palette.surfaceTertiary,
-                palette.surfaceSecondary.opacity(0.82),
-                AmberVisualTheme.mistBlue.opacity(0.04),
-            ]
-        }
-
-        return LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
-    }
-
     func glassTint(palette: AmberThemePalette) -> Color {
         switch self {
         case .hero:
-            return AmberVisualTheme.amberSoft.opacity(0.34)
+            return palette.glassHighlight.opacity(0.12)
         case .standard:
-            return palette.surfacePrimary.opacity(0.24)
+            return palette.glassHighlight.opacity(0.08)
         case .media:
-            return AmberVisualTheme.seaGlass.opacity(0.30)
+            return palette.glassHighlight.opacity(0.18)
         case .timeline:
-            return AmberVisualTheme.mistBlue.opacity(0.07)
-        }
-    }
-
-    var edgeTint: Color {
-        switch self {
-        case .hero:
-            return AmberVisualTheme.amberSoft
-        case .standard:
-            return AmberVisualTheme.mistBlue
-        case .media:
-            return AmberVisualTheme.seaGlass
-        case .timeline:
-            return AmberVisualTheme.mistBlue.opacity(0.75)
-        }
-    }
-
-    var shadowRadius: CGFloat {
-        switch self {
-        case .hero: 24
-        case .media: 19
-        case .standard: 12
-        case .timeline: 6
-        }
-    }
-
-    var shadowY: CGFloat {
-        switch self {
-        case .hero: 12
-        case .media: 9
-        case .standard: 6
-        case .timeline: 2
+            return palette.glassHighlight.opacity(0.05)
         }
     }
 
@@ -185,57 +122,37 @@ enum AuroraCardRole {
 }
 
 struct AmberAtmosphere: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        let palette = AmberVisualTheme.palette(for: colorScheme)
-
         ZStack {
-            palette.canvas
-            LinearGradient(
-                colors: [palette.atmosphereStart, palette.atmosphereMiddle, palette.atmosphereEnd],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            Color.clear
+            Color.clear
 
             Ellipse()
-                .fill(palette.amberGlow)
+                .fill(.clear)
                 .frame(width: 420, height: 300)
-                .blur(radius: 80)
                 .offset(x: -330, y: -260)
 
             Ellipse()
-                .fill(palette.seaGlassGlow)
+                .fill(.clear)
                 .frame(width: 520, height: 360)
-                .blur(radius: 95)
                 .offset(x: 330, y: 260)
 
             Ellipse()
-                .fill(palette.mistGlow)
+                .fill(.clear)
                 .frame(width: 560, height: 240)
-                .blur(radius: 100)
                 .offset(x: 50, y: -30)
         }
     }
 }
 
 struct AmberGlassBackdrop: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     var body: some View {
-        let palette = AmberVisualTheme.palette(for: colorScheme)
-
         if #available(macOS 26.0, *) {
-            RoundedRectangle(cornerRadius: 34, style: .continuous)
-                .fill(palette.surfaceSecondary)
-                .glassEffect(.regular.tint(palette.surfacePrimary), in: .rect(cornerRadius: 34))
+            Color.clear
+                .glassEffect(.regular, in: .rect(cornerRadius: 34))
         } else {
             RoundedRectangle(cornerRadius: 34, style: .continuous)
-                .fill(palette.surfaceSecondary)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 34, style: .continuous)
-                        .stroke(palette.border, lineWidth: 1)
-                )
+                .fill(.regularMaterial)
         }
     }
 }
@@ -243,7 +160,6 @@ struct AmberGlassBackdrop: View {
 struct TightCardDeck<Content: View>: View {
     let cornerRadius: CGFloat
     @ViewBuilder var content: Content
-    @Environment(\.colorScheme) private var colorScheme
 
     init(cornerRadius: CGFloat = 14, @ViewBuilder content: () -> Content) {
         self.cornerRadius = cornerRadius
@@ -251,24 +167,14 @@ struct TightCardDeck<Content: View>: View {
     }
 
     var body: some View {
-        let palette = AmberVisualTheme.palette(for: colorScheme)
-
         content
             .background {
                 if #available(macOS 26.0, *) {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [palette.surfaceTertiary, AmberVisualTheme.seaGlass.opacity(0.08)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .glassEffect(.regular.tint(palette.surfacePrimary.opacity(0.30)), in: .rect(cornerRadius: cornerRadius))
+                    Color.clear
+                        .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
                 } else {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(palette.surfaceTertiary)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                        .fill(.regularMaterial)
                 }
             }
     }
@@ -281,103 +187,76 @@ struct AuroraSymbolTile: View {
     var size: CGFloat = 38
     var cornerRadius: CGFloat = 11
 
-    @Environment(\.colorScheme) private var colorScheme
-
     @ViewBuilder
     var body: some View {
-        let palette = AmberVisualTheme.palette(for: colorScheme)
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
         if #available(macOS 26.0, *) {
-            tile(palette: palette, shape: shape)
+            tile
                 .glassEffect(.regular.tint(tint.opacity(0.18)), in: .rect(cornerRadius: cornerRadius))
         } else {
-            tile(palette: palette, shape: shape)
-                .background(.ultraThinMaterial, in: shape)
+            tile
+                .background(.regularMaterial, in: shape)
         }
     }
 
-    private func tile(
-        palette: AmberThemePalette,
-        shape: RoundedRectangle
-    ) -> some View {
-        ZStack {
-            shape.fill(
-                LinearGradient(
-                    colors: [
-                        tint.opacity(0.34),
-                        secondaryTint.opacity(0.20),
-                        palette.surfacePrimary.opacity(0.42),
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
-
-            Image(systemName: systemImage)
-                .font(.system(size: size * 0.46, weight: .semibold))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [palette.primaryText, tint],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        }
-        .frame(width: size, height: size)
-        .overlay(
-            shape.stroke(
-                LinearGradient(
-                    colors: [palette.glassHighlight, tint.opacity(0.32), palette.border],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                lineWidth: 0.9
-            )
-        )
-        .shadow(color: tint.opacity(0.16), radius: 8, y: 4)
+    private var tile: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: size * 0.46, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: size, height: size)
     }
 }
 
 enum AmberGlassSurfaceShape {
     case capsule
     case roundedRectangle(cornerRadius: CGFloat)
+    case circle
 }
 
 struct AmberGlassSurfaceModifier: ViewModifier {
-    let tint: Color
+    let tint: Color?
     let shape: AmberGlassSurfaceShape
-    @Environment(\.colorScheme) private var colorScheme
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        let palette = AmberVisualTheme.palette(for: colorScheme)
-
         switch shape {
         case .capsule:
             if #available(macOS 26.0, *) {
                 content
-                    .background(palette.controlFill, in: Capsule())
-                    .glassEffect(.regular.tint(tint.opacity(0.30)), in: .capsule)
+                    .glassEffect(glass, in: .capsule)
             } else {
                 content
-                    .background(palette.controlFill, in: Capsule())
-                    .overlay(Capsule().stroke(palette.border, lineWidth: 0.8))
+                    .background(.regularMaterial, in: Capsule())
             }
         case let .roundedRectangle(cornerRadius):
             if #available(macOS 26.0, *) {
                 content
-                    .background(palette.controlFill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .glassEffect(.regular.tint(tint.opacity(0.28)), in: .rect(cornerRadius: cornerRadius))
+                    .glassEffect(glass, in: .rect(cornerRadius: cornerRadius))
             } else {
                 content
-                    .background(palette.controlFill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .stroke(palette.border, lineWidth: 0.8)
+                    .background(
+                        .regularMaterial,
+                        in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     )
             }
+        case .circle:
+            if #available(macOS 26.0, *) {
+                content
+                    .glassEffect(glass, in: .circle)
+            } else {
+                content
+                    .background(.regularMaterial, in: Circle())
+            }
         }
+    }
+
+    @available(macOS 26.0, *)
+    private var glass: Glass {
+        if let tint {
+            return .regular.tint(tint.opacity(0.18))
+        }
+        return .regular
     }
 }
 
@@ -397,40 +276,14 @@ private struct AmberGlassCardModifier: ViewModifier {
             content
                 .padding(padding)
                 .background(role.opaqueSurface(palette: palette), in: shape)
-                .overlay(shape.stroke(palette.border, lineWidth: 1.15))
-                .shadow(color: palette.cardShadow, radius: role.shadowRadius * 0.55, y: role.shadowY * 0.5)
         } else if #available(macOS 26.0, *) {
             content
                 .padding(padding)
-                .background(role.gradient(palette: palette), in: shape)
                 .glassEffect(.regular.tint(role.glassTint(palette: palette)), in: .rect(cornerRadius: cornerRadius))
-                .overlay(
-                    shape.stroke(
-                        LinearGradient(
-                            colors: [palette.glassHighlight, role.edgeTint.opacity(0.34), palette.border],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1.05
-                    )
-                )
-                .shadow(color: palette.cardShadow, radius: role.shadowRadius, y: role.shadowY)
         } else {
             content
                 .padding(padding)
-                .background(role.gradient(palette: palette), in: shape)
-                .background(.ultraThinMaterial, in: shape)
-                .overlay(
-                    shape.stroke(
-                        LinearGradient(
-                            colors: [palette.glassHighlight, role.edgeTint.opacity(0.28), palette.border],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1.05
-                    )
-                )
-                .shadow(color: palette.cardShadow, radius: role.shadowRadius, y: role.shadowY)
+                .background(.regularMaterial, in: shape)
         }
     }
 }
@@ -444,7 +297,7 @@ extension View {
         modifier(AmberGlassCardModifier(role: role, padding: padding, cornerRadius: cornerRadius))
     }
 
-    func amberGlassSurface(tint: Color = .white, shape: AmberGlassSurfaceShape = .capsule) -> some View {
+    func amberGlassSurface(tint: Color? = nil, shape: AmberGlassSurfaceShape = .capsule) -> some View {
         modifier(AmberGlassSurfaceModifier(tint: tint, shape: shape))
     }
 }

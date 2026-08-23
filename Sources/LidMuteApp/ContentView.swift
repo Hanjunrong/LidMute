@@ -97,11 +97,15 @@ private struct HeaderBar: View {
                         .foregroundStyle(palette.secondaryText)
                         .lineLimit(1)
                 }
-                .padding(.horizontal, 11)
-                .padding(.vertical, 7)
-                .background(palette.controlFill, in: Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(
+                LiquidGlassButtonStyle(
+                    tint: AmberVisualTheme.mistBlue,
+                    shape: .capsule,
+                    horizontalPadding: 11,
+                    verticalPadding: 7
+                )
+            )
             .popover(isPresented: $showChromeGuide) {
                 ChromeGuideView(model: model)
             }
@@ -214,8 +218,7 @@ private struct MetricPill: View {
             .foregroundStyle(tint)
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(tint.opacity(0.16), in: Capsule())
-            .overlay(Capsule().stroke(tint.opacity(0.35), lineWidth: 0.8))
+            .amberGlassSurface(tint: tint, shape: .capsule)
     }
 }
 
@@ -251,14 +254,7 @@ private struct AutomationCard: View {
                     .accessibilityValue(model.nightScheduleEnabled ? "已开启" : "已关闭")
                     .disabled(!model.isEnabled)
                     .padding(5)
-                    .background(
-                        Capsule()
-                            .fill(AmberVisualTheme.amber.opacity(0.12))
-                    )
-                    .overlay(
-                        Capsule()
-                            .stroke(AmberVisualTheme.amber.opacity(0.25), lineWidth: 0.8)
-                    )
+                    .amberGlassSurface(tint: AmberVisualTheme.amber, shape: .capsule)
             }
 
             HStack(spacing: 9) {
@@ -267,8 +263,7 @@ private struct AutomationCard: View {
                     .font(ControlCenterTypography.numeric)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
-                    .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(palette.border))
+                    .amberGlassSurface(shape: .roundedRectangle(cornerRadius: 11))
                     .onChange(of: model.nightStartText) { _, _ in model.nightScheduleTextChanged() }
                     .disabled(!model.isEnabled)
 
@@ -281,8 +276,7 @@ private struct AutomationCard: View {
                     .font(ControlCenterTypography.numeric)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
-                    .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(palette.border))
+                    .amberGlassSurface(shape: .roundedRectangle(cornerRadius: 11))
                     .onChange(of: model.nightEndText) { _, _ in model.nightScheduleTextChanged() }
                     .disabled(!model.isEnabled)
             }
@@ -377,6 +371,7 @@ private struct SimulationCard: View {
                 .help("重置模拟状态")
                 .accessibilityLabel("重置模拟状态")
             }
+            .modifier(NativeGlassEffectContainerModifier(spacing: 9))
         }
         .frame(maxHeight: .infinity)
         .padding(10)
@@ -527,7 +522,8 @@ private struct ActivityTimeline: View {
                     LiquidGlassButtonStyle(
                         tint: AmberVisualTheme.danger,
                         isEmphasized: false,
-                        shape: .capsule
+                        shape: .capsule,
+                        usesTint: true
                     )
                 )
             }
@@ -693,7 +689,7 @@ private struct ChromeGuideView: View {
                     )
                 }
                 .padding(10)
-                .background(palette.surfaceTertiary, in: RoundedRectangle(cornerRadius: 10))
+                .amberGlassSurface(shape: .roundedRectangle(cornerRadius: 10))
 
                 Divider().opacity(0.3)
             } else if model.chromeConnectionState != .connected && model.chromeConnectionState != .receivedEvent {
@@ -708,8 +704,7 @@ private struct ChromeGuideView: View {
                             .font(ControlCenterTypography.codeCaption)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 8)
-                            .background(palette.controlFill, in: RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(palette.border))
+                            .amberGlassSurface(shape: .roundedRectangle(cornerRadius: 8))
 
                         Button {
                             model.registerChromeHost(extensionId: model.chromeExtensionId)
@@ -718,7 +713,12 @@ private struct ChromeGuideView: View {
                                 .font(ControlCenterTypography.button)
                         }
                         .buttonStyle(
-                            LiquidGlassButtonStyle(tint: AmberVisualTheme.seaGlass, isEmphasized: false, shape: .capsule)
+                            LiquidGlassButtonStyle(
+                                tint: AmberVisualTheme.seaGlass,
+                                isEmphasized: false,
+                                shape: .capsule,
+                                usesTint: true
+                            )
                         )
                         .fixedSize()
                     }
@@ -730,7 +730,7 @@ private struct ChromeGuideView: View {
                     }
                 }
                 .padding(10)
-                .background(palette.surfaceTertiary, in: RoundedRectangle(cornerRadius: 10))
+                .amberGlassSurface(shape: .roundedRectangle(cornerRadius: 10))
 
                 Divider().opacity(0.3)
             }
@@ -799,12 +799,13 @@ private struct GuideStep: View {
             HStack(spacing: 8) {
                 ZStack {
                     Circle()
-                        .fill(AmberVisualTheme.amber.opacity(0.15))
+                        .fill(.clear)
                     Text(number)
                         .font(ControlCenterTypography.compactCaption)
                         .foregroundStyle(AmberVisualTheme.amber)
                 }
                 .frame(width: 22, height: 22)
+                .amberGlassSurface(tint: AmberVisualTheme.amber, shape: .circle)
 
                 Text(title)
                     .font(ControlCenterTypography.cardTitle)
@@ -820,4 +821,8 @@ private struct GuideStep: View {
             .padding(.leading, 30)
         }
     }
+}
+
+#Preview {
+    ContentView(model: AppViewModel())
 }

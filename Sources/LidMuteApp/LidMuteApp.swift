@@ -42,6 +42,11 @@ struct LidMuteApp: App {
     var body: some Scene {
         WindowGroup("LidMute") {
             ContentView(model: appDelegate.model)
+                .materialActiveAppearance(.active)
+                .containerBackground(
+                    Material.ultraThin.materialActiveAppearance(.active),
+                    for: .window
+                )
         }
         .defaultSize(width: 1120, height: 680)
 

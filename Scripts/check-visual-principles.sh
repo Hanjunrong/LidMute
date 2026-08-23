@@ -41,8 +41,9 @@ grep -q "func amberGlassCard" "$theme_file" \
     && grep -q "role: AuroraCardRole" "$theme_file" \
     || fail "Aurora cards must require an explicit semantic role"
 
-grep -q "LinearGradient" "$theme_file" \
-    || fail "Aurora surfaces must include gradient depth"
+if grep -q "LinearGradient\|RadialGradient\|AngularGradient\|\.blur(" "$theme_file"; then
+    fail "macOS 26 surfaces must not simulate Liquid Glass with gradients or blur"
+fi
 
 if grep -qF 'Color.black.opacity(0.22)' "$theme_file"; then
     fail "Card decks must not fall back to the obsolete flat black fill"
@@ -85,19 +86,38 @@ fi
 grep -q "AmberVisualTheme.palette" "$repo_root/Sources/LidMuteApp/LiquidGlassControls.swift" \
     || fail "LiquidGlassControls must consume the adaptive semantic theme palette"
 
-grep -q "struct AuroraControlChrome" "$controls_file" \
-    || fail "Liquid Glass controls must share Aurora optical chrome"
+grep -q "PrimitiveButtonStyle" "$controls_file" \
+    || fail "Liquid Glass controls must delegate interaction to native primitive button styles"
 
-grep -qF '.spring(response: 0.30, dampingFraction: 1.0)' "$controls_file" \
-    || fail "Control Center buttons must return with a critically damped spring"
+grep -qF '.buttonStyle(.glass)' "$controls_file" \
+    || fail "Standard macOS 26 controls must use the native glass button style"
 
-reduce_motion_count="$(grep -oF 'accessibilityReduceMotion' "$controls_file" | wc -l | tr -d ' ')"
-[[ "$reduce_motion_count" -ge 2 ]] \
-    || fail "Shared button styles must honor Reduce Motion"
+grep -qF '.buttonStyle(.glassProminent)' "$controls_file" \
+    || fail "Emphasized macOS 26 controls must use the native prominent glass button style"
 
-interactive_count="$(grep -oF '.interactive()' "$controls_file" | wc -l | tr -d ' ')"
-[[ "$interactive_count" -ge 2 ]] \
-    || fail "Native Liquid Glass button paths must remain interactive"
+grep -qF '.buttonStyle(.glass(.regular.tint(tint)))' "$controls_file" \
+    || fail "Tinted macOS 26 controls must use the native tinted glass button style"
+
+grep -q "GlassEffectContainer(spacing: spacing)" "$controls_file" \
+    || fail "Related glass controls must support native GlassEffectContainer grouping"
+
+grep -qF '.background(.regularMaterial' "$controls_file" \
+    || fail "Pre-macOS 26 controls must use the standard Material fallback"
+
+if grep -q "LinearGradient" "$controls_file"; then
+    fail "Liquid Glass buttons must not draw simulated gradient chrome"
+fi
+
+if grep -qF '.interactive()' "$controls_file"; then
+    fail "macOS glass buttons must rely on their native button style interaction"
+fi
+
+if grep -q "AuroraControlChrome\|IconInteractionModifier" "$controls_file"; then
+    fail "Liquid Glass buttons must not stack custom chrome or press effects over native glass"
+fi
+
+grep -qF '#Preview {' "$content_view" \
+    || fail "The native Liquid Glass interface must include a SwiftUI preview"
 
 icon_renderer="$repo_root/Scripts/render-app-icon.swift"
 grep -qF '"shield.fill"' "$icon_renderer" \
