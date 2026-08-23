@@ -23,6 +23,7 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("AudioToolbox"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("SwiftUI"),
             ]

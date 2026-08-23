@@ -318,22 +318,47 @@ async function sendAudibleTab(tab) {
   await flushOutbox();
 }
 
+async function scanAudibleTabs() {
+  if (!chrome.tabs?.query) return;
+  const tabs = await chrome.tabs.query({ audible: true });
+  for (const tab of tabs) await sendAudibleTab(tab);
+}
+
+function addListener(owner, eventName, listener) {
+  try {
+    const target = owner?.[eventName];
+    if (target && typeof target.addListener === 'function') {
+      target.addListener(listener);
+      return true;
+    }
+    console.warn(`LidMute: ${eventName} unavailable; is the manifest missing a permission?`);
+  } catch (error) {
+    console.warn(`LidMute: failed to attach ${eventName}`, error);
+  }
+  return false;
+}
+
 if (typeof chrome !== 'undefined') {
-  chrome.tabs.onUpdated.addListener((_id, changeInfo, tab) => {
+  // Register every listener defensively: a missing permission (e.g. an older
+  // manifest without "alarms") or unavailable API must never abort service
+  // worker evaluation. An uncaught error here surfaces in chrome://extensions
+  // as "Service worker registration failed. Status code: 15"
+  // (kErrorScriptEvaluateFailed) and disables the whole extension.
+  runSafely(connect);
+  runSafely(scanAudibleTabs);
+  addListener(chrome.tabs, 'onUpdated', (_id, changeInfo, tab) => {
     if (changeInfo.audible === true) runSafely(() => sendAudibleTab(tab));
   });
-  chrome.alarms.onAlarm.addListener((alarm) => {
+  addListener(chrome.alarms, 'onAlarm', (alarm) => {
     runSafely(() => retries().fire(alarm));
   });
   runSafely(() => retries().restore());
-  chrome.runtime.onStartup.addListener(() => {
+  addListener(chrome.runtime, 'onStartup', () => {
     runSafely(async () => {
       await retries().restore();
       await flushOutbox();
-      for (const tab of await chrome.tabs.query({ audible: true })) {
-        await sendAudibleTab(tab);
-      }
+      await scanAudibleTabs();
     });
   });
-  chrome.runtime.onInstalled.addListener(() => runSafely(flushOutbox));
+  addListener(chrome.runtime, 'onInstalled', () => runSafely(flushOutbox));
 }

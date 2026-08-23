@@ -1,9 +1,11 @@
 import AppKit
 import CoreAudio
+import Darwin
 import Foundation
 import LidMuteCore
 
 final class SystemAudioController: AudioControlling, @unchecked Sendable {
+    private let processLevelProbe = ProcessAudioLevelProbe()
     func resolveBuiltInSpeaker(uid: String?) throws -> AudioDevice? {
         let defaultOutputID = try readDefaultOutputDevice()
         let candidates = try readAudioDeviceIDs().compactMap { deviceID in
@@ -69,17 +71,72 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         return processIDs.compactMap { processID in
             guard let pid = try? readInt32(objectID: processID, selector: kAudioProcessPropertyPID),
                   let running = try? readUInt32(objectID: processID, selector: kAudioProcessPropertyIsRunningOutput, scope: kAudioObjectPropertyScopeGlobal),
-                  running != 0 else { return nil }
-            let application = NSRunningApplication(processIdentifier: pid_t(pid))
+                  running != 0,
+                  processLevelProbe.hasAudibleOutput(pid: pid_t(pid)) else { return nil }
+            let identity = processIdentity(pid: pid_t(pid))
             return AudioProcess(
                 pid: pid,
-                name: application?.localizedName ?? "PID \(pid)",
-                bundleID: application?.bundleIdentifier,
-                executablePath: application?.executableURL?.path,
-                launchDate: application?.launchDate,
+                name: identity.name,
+                bundleID: identity.bundleID,
+                executablePath: identity.executablePath,
+                launchDate: identity.launchDate,
                 isOutputActive: true
             )
         }
+    }
+
+    private struct ProcessIdentity {
+        let name: String
+        let bundleID: String?
+        let executablePath: String?
+        let launchDate: Date?
+    }
+
+    private func processIdentity(pid: pid_t) -> ProcessIdentity {
+        let application = NSRunningApplication(processIdentifier: pid)
+        let path = application?.executableURL?.path ?? executablePath(for: pid)
+        let bundleID = application?.bundleIdentifier ?? bundleIdentifier(for: path)
+        let name = application?.localizedName
+            ?? knownApplicationName(path: path, bundleID: bundleID)
+            ?? path.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
+            ?? "PID \(pid)"
+        return ProcessIdentity(
+            name: name,
+            bundleID: bundleID,
+            executablePath: path,
+            launchDate: application?.launchDate
+        )
+    }
+
+    private func executablePath(for pid: pid_t) -> String? {
+        // PROC_PIDPATHINFO_MAXSIZE is a C macro that Swift imports only as
+        // PROC_PIDPATHINFO_SIZE on current macOS SDKs.
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    private func bundleIdentifier(for path: String?) -> String? {
+        guard var url = path.map(URL.init(fileURLWithPath:)) else { return nil }
+        while url.path != "/" {
+            if url.pathExtension == "app", let identifier = Bundle(path: url.path)?.bundleIdentifier {
+                return identifier
+            }
+            url.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    private func knownApplicationName(path: String?, bundleID: String?) -> String? {
+        if bundleID == "com.bytedance.douyin.desktop" { return "抖音" }
+        if bundleID == "cn.wenyu.bodian.bodianPc" { return "波点音乐" }
+        guard let path else { return nil }
+        let lowercased = path.lowercased()
+        if lowercased.contains("douyin") || path.contains("抖音") { return "抖音" }
+        if lowercased.contains("bodian") || path.contains("波点") { return "波点音乐" }
+        if lowercased.contains("google chrome") || lowercased.contains("chrome") { return "Google Chrome" }
+        return nil
     }
 
     private func readDefaultOutputDevice() throws -> AudioDeviceID {

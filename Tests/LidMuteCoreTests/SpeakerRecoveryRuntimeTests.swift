@@ -145,7 +145,7 @@ final class SpeakerRecoveryRuntimeTests: XCTestCase {
 
         XCTAssertEqual(outcome, .restored)
         XCTAssertEqual(audio.operations.filter { $0.hasPrefix("writeVolume:") }, ["writeVolume:0.72"])
-        XCTAssertTrue(audio.operations.contains("writeMute:false"))
+        XCTAssertTrue(audio.operations.contains("writeMuted:false"))
         XCTAssertEqual(store.loadResult, .none)
     }
 

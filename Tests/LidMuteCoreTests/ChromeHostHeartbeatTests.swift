@@ -1,33 +1,16 @@
+import Darwin
 import Foundation
 import Testing
 @testable import LidMuteCore
+
+@_silgen_name("flock")
+private func testFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
 private final class HeartbeatTestErrors: @unchecked Sendable {
     private let lock = NSLock()
     private var errors: [Error] = []
     func record(_ error: Error) { lock.withLock { errors.append(error) } }
     func first() -> Error? { lock.withLock { errors.first } }
-}
-
-private func waitForFile(at url: URL, timeout: TimeInterval) -> Bool {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-        if FileManager.default.fileExists(atPath: url.path) { return true }
-        Thread.sleep(forTimeInterval: 0.01)
-    }
-    return FileManager.default.fileExists(atPath: url.path)
-}
-
-private func stop(_ process: Process) {
-    guard process.isRunning else { return }
-    process.terminate()
-    let deadline = Date().addingTimeInterval(2)
-    while process.isRunning, Date() < deadline {
-        Thread.sleep(forTimeInterval: 0.01)
-    }
-    if process.isRunning {
-        Darwin.kill(process.processIdentifier, SIGKILL)
-    }
 }
 
 @Test func heartbeatIsFreshThroughSixSecondsOnly() throws {
@@ -151,17 +134,27 @@ func impossibleHeartbeatUptimeIsStale(_ heartbeatUptime: TimeInterval) throws {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     let heartbeatURL = root.appending(path: "heartbeat.json")
     let lockURL = root.appending(path: ".heartbeat.json.lock")
-    let readyURL = root.appending(path: "lock-ready")
-
-    let lockHolder = Process()
-    lockHolder.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    lockHolder.arguments = [
-        "lockf", "-k", lockURL.path,
-        "sh", "-c", "touch \"$1\"; sleep 60", "helper", readyURL.path,
-    ]
-    try lockHolder.run()
-    defer { stop(lockHolder) }
-    #expect(waitForFile(at: readyURL, timeout: 2))
+    let holderReady = DispatchSemaphore(value: 0)
+    let releaseHolder = DispatchSemaphore(value: 0)
+    let holderGroup = DispatchGroup()
+    holderGroup.enter()
+    DispatchQueue.global().async {
+        defer { holderGroup.leave() }
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, 0o600)
+        guard descriptor >= 0 else {
+            holderReady.signal()
+            return
+        }
+        defer { Darwin.close(descriptor) }
+        guard testFlock(descriptor, LOCK_EX) == 0 else {
+            holderReady.signal()
+            return
+        }
+        holderReady.signal()
+        releaseHolder.wait()
+        _ = testFlock(descriptor, LOCK_UN)
+    }
+    #expect(holderReady.wait(timeout: .now() + 2) == .success)
 
     let writeCompleted = DispatchSemaphore(value: 0)
     let errors = HeartbeatTestErrors()
@@ -181,8 +174,9 @@ func impossibleHeartbeatUptimeIsStale(_ heartbeatUptime: TimeInterval) throws {
     }
 
     #expect(writeCompleted.wait(timeout: .now() + 0.2) == .timedOut)
-    stop(lockHolder)
+    releaseHolder.signal()
     #expect(writeCompleted.wait(timeout: .now() + 2) == .success)
+    holderGroup.wait()
     if let error = errors.first() { throw error }
     #expect(
         FileChromeHostHeartbeatStore(url: heartbeatURL).readFreshness(nowUptime: 10) ==

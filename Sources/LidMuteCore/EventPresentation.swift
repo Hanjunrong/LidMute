@@ -28,8 +28,6 @@ public struct EventPresentation: Equatable, Sendable {
             (title, symbolName) = ("夜间保护已开始", "moon.stars.fill")
         case .nightProtectionEnded:
             (title, symbolName) = ("夜间保护已结束", "sunrise.fill")
-        case .mediaCommandSent:
-            (title, symbolName) = ("媒体命令已发送", "playpause.fill")
         }
     }
 }

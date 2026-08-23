@@ -1,8 +1,33 @@
 import Foundation
 import XCTest
+import AudioToolbox
+import CoreAudio
 @testable import LidMuteCore
+@testable import LidMuteApp
 
 final class ExistingBehaviorTests: XCTestCase {
+
+    func testProcessAudioProbeUsesStrictPeakThreshold() {
+        XCTAssertFalse(ProcessAudioLevelProbe.isAudible(peak: 0))
+        XCTAssertFalse(ProcessAudioLevelProbe.isAudible(peak: 0.0005))
+        XCTAssertTrue(ProcessAudioLevelProbe.isAudible(peak: 0.001))
+        XCTAssertFalse(ProcessAudioLevelProbe.isAudible(peak: .nan))
+    }
+
+    func testProcessAudioTapAggregateBindsTapToDefaultOutput() {
+        let tapUUID = UUID()
+        let description = ProcessAudioTapConfiguration.aggregateDescription(
+            tapUUID: tapUUID,
+            outputUID: "BuiltInOutputDevice",
+            name: "test"
+        )
+
+        XCTAssertEqual(description[kAudioAggregateDeviceMainSubDeviceKey] as? String, "BuiltInOutputDevice")
+        XCTAssertEqual(description[kAudioAggregateDeviceTapAutoStartKey] as? Bool, true)
+        let taps = description[kAudioAggregateDeviceTapListKey] as? [[String: Any]]
+        XCTAssertEqual(taps?.first?[kAudioSubTapUIDKey] as? String, tapUUID.uuidString)
+        XCTAssertEqual(taps?.first?[kAudioSubTapDriftCompensationKey] as? Bool, true)
+    }
 
     func testChromeEvidenceRoundTripsWithoutLosingURL() throws {
         let evidence = ChromeTabEvidence(
@@ -186,18 +211,6 @@ final class ExistingBehaviorTests: XCTestCase {
         ), "invalid edit replaced the last valid schedule")
     }
 
-    func testMediaCommandsUseSystemKeyTypes() throws {
-        XCTAssertTrue(MediaCommand.previous.rawValue == 18)
-        XCTAssertTrue(MediaCommand.next.rawValue == 17)
-        XCTAssertTrue(MediaCommand.playPause.rawValue == 16)
-
-        let events = MediaKeyEventDescriptor.events(for: .playPause)
-        XCTAssertTrue(events == [
-            MediaKeyEventDescriptor(modifierFlags: 0xA00, data1: 0x100A00),
-            MediaKeyEventDescriptor(modifierFlags: 0xB00, data1: 0x100B00),
-        ])
-    }
-
     func testAudioSourcePresentationPrefersReadableNames() throws {
         let chrome = activeProcess(pid: 1357)
         let tab = ChromeTabEvidence(
@@ -239,6 +252,48 @@ final class ExistingBehaviorTests: XCTestCase {
         XCTAssertTrue(musicSource.subtitle == "com.netease.163music")
         XCTAssertTrue(unknownSource.title == "PID 9753")
         XCTAssertTrue(unknownSource.subtitle.isEmpty)
+    }
+
+    func testAudioProcessDisplayNameHidesPIDFallback() {
+        let chrome = AudioProcess(
+            pid: 1157,
+            name: "PID 1157",
+            bundleID: "com.google.Chrome",
+            executablePath: nil,
+            launchDate: nil,
+            isOutputActive: true
+        )
+        XCTAssertEqual(chrome.displayName, "Google Chrome")
+
+        let unknown = AudioProcess(
+            pid: 9753,
+            name: "PID 9753",
+            bundleID: nil,
+            executablePath: nil,
+            launchDate: nil,
+            isOutputActive: true
+        )
+        XCTAssertEqual(unknown.displayName, "未知音频应用（PID 9753）")
+
+        let douyinHelper = AudioProcess(
+            pid: 94024,
+            name: "PID 94024",
+            bundleID: nil,
+            executablePath: "/Applications/Douyin.app/Contents/Frameworks/Douyin Helper.app/Contents/MacOS/Douyin Helper",
+            launchDate: nil,
+            isOutputActive: true
+        )
+        XCTAssertEqual(douyinHelper.displayName, "抖音")
+
+        let douyinBundle = AudioProcess(
+            pid: 94025,
+            name: "PID 94025",
+            bundleID: "com.bytedance.douyin.desktop",
+            executablePath: nil,
+            launchDate: nil,
+            isOutputActive: true
+        )
+        XCTAssertEqual(douyinBundle.displayName, "抖音")
     }
 
     func testCurrentAudioSourcesRequireAnActiveChromeProcess() throws {

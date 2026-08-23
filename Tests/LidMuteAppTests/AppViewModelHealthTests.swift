@@ -499,8 +499,9 @@ private final class AppHealthFixture {
     let fixture = AppHealthFixture(audioPoll: .failure(.queryFailed))
     let model = fixture.makeViewModel()
     model.pollAudioProcesses()
-    await Task.yield()
-    await Task.yield()
+    for _ in 0..<100 where model.health.coreAudio != .queryFailed {
+        await Task.yield()
+    }
     #expect(model.health.coreAudio == .queryFailed)
     #expect(fixture.diagnostics.events.contains(.coreAudioQueryFailed))
 }
@@ -517,8 +518,9 @@ private final class AppHealthFixture {
         isOutputActive: true
     )]))
     model.pollAudioProcesses()
-    await Task.yield()
-    await Task.yield()
+    for _ in 0..<100 where model.health.coreAudio != .queryFailed {
+        await Task.yield()
+    }
     #expect(model.currentAudioProcesses.map(\.pid) == [7])
     #expect(model.health.coreAudio == .queryFailed)
 }

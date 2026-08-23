@@ -419,50 +419,15 @@ private struct NowPlayingCard: View {
                     .foregroundStyle(palette.secondaryText)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(model.currentAudioProcesses, id: \.pid) { process in
                             AudioProcessRow(process: process)
                         }
                     }
                 }
-                // The card's 190pt outer frame includes its 8pt glass-card padding.
-                // Keep the two-row viewport within the remaining content height.
-                .frame(height: 70)
+                .frame(maxHeight: .infinity, alignment: .top)
                 .scrollIndicators(.visible)
             }
-
-            HStack(spacing: 8) {
-                Spacer()
-                Button { model.sendMediaCommand(.previous) } label: {
-                    Image(systemName: "backward.fill")
-                }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue, size: 32))
-                .help("上一首")
-                .accessibilityLabel("上一首")
-
-                Button { model.sendMediaCommand(.playPause) } label: {
-                    Image(systemName: "playpause.fill")
-                }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.amber, isEmphasized: true, size: 36))
-                .help("暂停或开始")
-                .accessibilityLabel("暂停/开始")
-
-                Button { model.sendMediaCommand(.next) } label: {
-                    Image(systemName: "forward.fill")
-                }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue, size: 32))
-                .help("下一首")
-                .accessibilityLabel("下一首")
-                Spacer()
-            }
-
-            Text(model.mediaStatus)
-                .font(ControlCenterTypography.compactCaption)
-                .foregroundStyle(palette.tertiaryText)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
         }
         .frame(maxHeight: .infinity)
         .padding(8)
@@ -472,12 +437,6 @@ private struct NowPlayingCard: View {
 
 private struct AudioProcessRow: View {
     let process: AudioProcess
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var palette: AmberThemePalette {
-        AmberVisualTheme.palette(for: colorScheme)
-    }
-
     var body: some View {
         HStack(spacing: 10) {
             AuroraSymbolTile(
@@ -489,20 +448,16 @@ private struct AudioProcessRow: View {
             )
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(process.name)
+                Text(process.displayName)
                     .font(ControlCenterTypography.cardTitle)
-                    .lineLimit(1)
-                Text(process.bundleID ?? process.executablePath ?? "PID \(process.pid)")
-                    .font(ControlCenterTypography.caption)
-                    .foregroundStyle(palette.secondaryText)
                     .lineLimit(1)
             }
 
             Spacer()
-            Text("\(process.pid)")
-                .font(ControlCenterTypography.numericCaption)
-                .foregroundStyle(palette.tertiaryText)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(process.displayName)
     }
 }
 
@@ -674,7 +629,7 @@ private struct EventTimelineRow: View {
         switch event.kind {
         case .error:
             return AmberVisualTheme.danger
-        case .chromeTabAudible, .audioProcessDetected, .mediaCommandSent:
+        case .chromeTabAudible, .audioProcessDetected:
             return AmberVisualTheme.seaGlass
         case .restored, .lidOpened, .nightProtectionEnded:
             return AmberVisualTheme.mistBlue

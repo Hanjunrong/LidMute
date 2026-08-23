@@ -129,6 +129,7 @@ cat > "$staged_app/Contents/Info.plist" <<EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$short_version</string>
   <key>CFBundleVersion</key><string>$build_version</string>
+  <key>NSAudioCaptureUsageDescription</key><string>LidMute 需要读取各音频进程的实时电平，以准确识别当前正在发声的应用。</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
 </dict>
 </plist>

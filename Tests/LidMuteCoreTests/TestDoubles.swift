@@ -202,12 +202,12 @@ final class ScriptedAudioController: AudioControlling, @unchecked Sendable {
         writtenDeviceUIDs.append(device.uid)
         timeline?.append("audio.writeMuted:\(muted)")
         if (writeMutedCount == 1 && (failAt == .initialSilence || failAt == .restoreMute)) ||
-            (writeMutedCount == 2 && (
+            (writeMutedCount == 1 && (
                 failAt == .finalUnmute ||
                 failAt == .finalUnmuteAndResilence ||
                 failAt == .finalUnmuteAndResilenceReadBack
             )) ||
-            (writeMutedCount == 3 && failAt == .finalUnmuteAndResilence) {
+            (writeMutedCount == 2 && failAt == .finalUnmuteAndResilence) {
             throw FakeAudioError.scriptedFailure
         }
         if muted {
@@ -234,7 +234,7 @@ final class ScriptedAudioController: AudioControlling, @unchecked Sendable {
         if failAt == .readBack ||
             (readCount == 1 && (failAt == .initialReadBack || failAt == .restoreMuteReadBack)) ||
             (readCount == 2 && failAt == .restoreVolumeReadBack) ||
-            (readCount == 3 && (
+            (readCount == 2 && (
                 failAt == .finalReadBack ||
                 failAt == .finalUnmuteAndResilenceReadBack
             )) {

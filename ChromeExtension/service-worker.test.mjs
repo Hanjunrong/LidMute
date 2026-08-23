@@ -254,6 +254,7 @@ test('fire-and-forget restore failure is caught and startup recreates its durabl
   const startupCompleted = deferred();
   const alarms = new Map();
   let createCount = 0;
+  let connectCount = 0;
   const portDisconnect = listenerHarness();
   const portMessage = listenerHarness();
   const alarmEvent = listenerHarness();
@@ -292,6 +293,7 @@ test('fire-and-forget restore failure is caught and startup recreates its durabl
     },
     runtime: {
       connectNative() {
+        connectCount += 1;
         return {
           onDisconnect: portDisconnect.api,
           onMessage: portMessage.api,
@@ -311,6 +313,7 @@ test('fire-and-forget restore failure is caught and startup recreates its durabl
   };
 
   await import(new URL('./service-worker.mjs?fire-and-forget-recovery-test', import.meta.url));
+  assert.equal(connectCount, 1);
   await failedCreate.promise;
   await new Promise(setImmediate);
 

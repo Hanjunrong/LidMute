@@ -19,32 +19,6 @@ public enum SimulationLidState: Sendable {
     case reset
 }
 
-public enum MediaCommand: Int, Codable, CaseIterable, Sendable {
-    case previous = 18
-    case next = 17
-    case playPause = 16
-}
-
-public struct MediaKeyEventDescriptor: Equatable, Sendable {
-    public let modifierFlags: UInt
-    public let data1: Int
-
-    public init(modifierFlags: UInt, data1: Int) {
-        self.modifierFlags = modifierFlags
-        self.data1 = data1
-    }
-
-    public static func events(for command: MediaCommand) -> [Self] {
-        [0xA, 0xB].map { keyState in
-            let flags = keyState << 8
-            return Self(
-                modifierFlags: UInt(flags),
-                data1: (command.rawValue << 16) | flags
-            )
-        }
-    }
-}
-
 public enum LidMuteEventKind: String, Codable, Sendable {
     case protectionEnabled
     case protectionDisabled
@@ -58,7 +32,6 @@ public enum LidMuteEventKind: String, Codable, Sendable {
     case simulation
     case nightProtectionStarted
     case nightProtectionEnded
-    case mediaCommandSent
 }
 
 public enum CorrelationStatus: String, Codable, Sendable {
@@ -108,6 +81,34 @@ public struct AudioProcess: Codable, Equatable, Sendable {
         self.executablePath = executablePath
         self.launchDate = launchDate
         self.isOutputActive = isOutputActive
+    }
+
+    /// A user-facing process name that never exposes the internal PID fallback.
+    public var displayName: String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty && !trimmedName.lowercased().hasPrefix("pid ") {
+            return trimmedName
+        }
+
+        switch bundleID {
+        case "com.google.Chrome": return "Google Chrome"
+        case "com.apple.Music": return "Music"
+        case "com.apple.Safari": return "Safari"
+        case "com.bytedance.douyin.desktop": return "抖音"
+        case "cn.wenyu.bodian.bodianPc": return "波点音乐"
+        default:
+            if let executablePath {
+                let path = executablePath.lowercased()
+                if path.contains("douyin") || executablePath.contains("抖音") { return "抖音" }
+                if path.contains("bodian") || executablePath.contains("波点") { return "波点音乐" }
+                if path.contains("google chrome") || path.contains("chrome") { return "Google Chrome" }
+            }
+            if let bundleID {
+                let component = bundleID.split(separator: ".").last.map(String.init) ?? ""
+                if !component.isEmpty { return "未知音频应用（\(component)）" }
+            }
+            return "未知音频应用（PID \(pid)）"
+        }
     }
 }
 

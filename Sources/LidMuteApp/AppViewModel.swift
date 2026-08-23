@@ -149,7 +149,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published private(set) var isDisplaySleeping = false
     @Published private(set) var isNightProtectionActive = false
     @Published private(set) var nightScheduleStatus = "夜间静音未开启"
-    @Published private(set) var mediaStatus = "系统媒体控制就绪"
     @Published var chromeExtensionId = ""
     @Published private(set) var chromeRegistrationStatus = ""
     @Published private(set) var chromeExtensionPath = ""
@@ -228,7 +227,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var lastLidMonitorResult: LidMonitorResult = .state(false)
     private var chromeDiagnosticState: ChromeDiagnosticState = .none
     private var chromeBridgeIsDegraded = false
-    private let mediaController = SystemMediaController()
     private let nightPreferences = NightProtectionPreferences()
     private var effectiveNightSchedule = NightSchedule(startMinutes: 0, endMinutes: 8 * 60)
     private var hasStarted = false
@@ -566,15 +564,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         enqueueProtectionEvent { model in await model.refreshNightProtection() }
     }
 
-    func sendMediaCommand(_ command: MediaCommand) {
-        do {
-            try mediaController.send(command)
-            mediaStatus = "已发送系统媒体命令：\(mediaCommandName(command))"
-        } catch {
-            mediaStatus = "媒体命令失败：\(error.localizedDescription)"
-        }
-    }
-
     func clearObservationData() async {
         guard !isClearingObservationData else { return }
         isClearingObservationData = true
@@ -803,14 +792,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         isNightProtectionActive = shouldProtect
         await coordinator.receiveNightProtection(shouldProtect)
         refresh()
-    }
-
-    private func mediaCommandName(_ command: MediaCommand) -> String {
-        switch command {
-        case .previous: return "上一首"
-        case .next: return "下一首"
-        case .playPause: return "暂停/开始"
-        }
     }
 
     private func startChromeObservationTimerIfReady() {

@@ -31,9 +31,6 @@ final class AutomaticMediaControlTests: XCTestCase {
         XCTAssertEqual(coordinator.latestChromeEvidence, evidence)
     }
 
-    func testManualMediaDescriptorsRemainAvailable() {
-        XCTAssertEqual(MediaKeyEventDescriptor.events(for: .playPause).count, 2)
-    }
 }
 
 extension ChromeTabEvidence {
