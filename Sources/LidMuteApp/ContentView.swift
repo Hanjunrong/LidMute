@@ -129,20 +129,35 @@ private struct GuardHero: View {
         AmberVisualTheme.palette(for: colorScheme)
     }
 
+    private var presentation: GuardHeroPresentation {
+        GuardHeroPresentation(
+            lifecycleState: model.lifecycleState,
+            isEnabled: model.isEnabled,
+            isNightProtectionActive: model.isNightProtectionActive,
+            statusText: model.statusText
+        )
+    }
+
     var body: some View {
         HStack(spacing: 24) {
             VStack(alignment: .leading, spacing: 9) {
-                Label(model.isEnabled ? "守卫已开启" : "守卫未开启", systemImage: model.isEnabled ? "shield.fill" : "shield.slash")
+                Label(presentation.eyebrow, systemImage: model.isEnabled ? "shield.fill" : "shield.slash")
                     .font(ControlCenterTypography.heroEyebrow)
                     .foregroundStyle(model.isEnabled ? AmberVisualTheme.amber : palette.secondaryText)
 
-                Text(heroTitle)
+                Text(presentation.title)
                     .font(ControlCenterTypography.heroTitle)
                     .tracking(-0.65)
 
-                Text(heroSubtitle)
+                Text(presentation.subtitle)
                     .font(ControlCenterTypography.body)
                     .foregroundStyle(palette.secondaryText)
+
+                if model.health.recovery == .failedSafetyUnknown {
+                    Label("扬声器安全状态未知，正常退出已阻止", systemImage: "exclamationmark.octagon.fill")
+                        .font(ControlCenterTypography.caption)
+                        .foregroundStyle(AmberVisualTheme.danger)
+                }
 
                 HStack(spacing: 8) {
                     MetricPill(
@@ -156,7 +171,9 @@ private struct GuardHero: View {
                         tint: AmberVisualTheme.seaGlass
                     )
                     MetricPill(
-                        title: model.currentAudioProcesses.isEmpty ? "无活动音频" : "\(model.currentAudioProcesses.count) 个音频进程",
+                        title: model.health.coreAudio == .queryFailed
+                            ? "CoreAudio 查询失败"
+                            : (model.currentAudioProcesses.isEmpty ? "无活动音频" : "\(model.currentAudioProcesses.count) 个音频进程"),
                         systemImage: "waveform",
                         tint: AmberVisualTheme.amber
                     )
@@ -177,24 +194,13 @@ private struct GuardHero: View {
                     shape: .capsule
                 )
             )
+            .disabled(!presentation.canToggleGuard)
         }
         .frame(maxHeight: .infinity)
         .padding(10)
         .amberGlassCard(role: .hero, padding: 0, cornerRadius: 14)
     }
 
-    private var heroTitle: String {
-        if !model.isEnabled { return "安静由你决定" }
-        if model.isNightProtectionActive { return "夜间模式正在保护外放" }
-        if model.statusText.contains("正在保护") { return "外放安静，一切正常" }
-        return "等待合盖或夜间息屏"
-    }
-
-    private var heroSubtitle: String {
-        model.isEnabled
-            ? "只控制 Mac 内建扬声器，耳机与外接音频不会被修改。"
-            : "开启后，只有合盖或夜间息屏策略会触发静音。"
-    }
 }
 
 private struct MetricPill: View {
@@ -397,60 +403,31 @@ private struct NowPlayingCard: View {
                 )
                 Spacer()
                 Circle()
-                    .fill(model.currentAudioProcesses.isEmpty ? Color.secondary.opacity(0.4) : AmberVisualTheme.seaGlass)
+                    .fill(model.health.coreAudio == .queryFailed
+                        ? AmberVisualTheme.danger
+                        : (model.currentAudioProcesses.isEmpty ? Color.secondary.opacity(0.4) : AmberVisualTheme.seaGlass))
                     .frame(width: 8, height: 8)
             }
 
-            if model.currentAudioProcesses.isEmpty {
+            if model.health.coreAudio == .queryFailed {
+                Label("无法查询 CoreAudio，请检查系统状态", systemImage: "exclamationmark.triangle")
+                    .font(ControlCenterTypography.body)
+                    .foregroundStyle(AmberVisualTheme.danger)
+            } else if model.currentAudioProcesses.isEmpty {
                 Label("当前没有活动音频", systemImage: "speaker.slash")
                     .font(ControlCenterTypography.body)
                     .foregroundStyle(palette.secondaryText)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 8) {
                         ForEach(model.currentAudioProcesses, id: \.pid) { process in
                             AudioProcessRow(process: process)
                         }
                     }
                 }
-                // The card's 190pt outer frame includes its 8pt glass-card padding.
-                // Keep the two-row viewport within the remaining content height.
-                .frame(height: 70)
+                .frame(maxHeight: .infinity, alignment: .top)
                 .scrollIndicators(.visible)
             }
-
-            HStack(spacing: 8) {
-                Spacer()
-                Button { model.sendMediaCommand(.previous) } label: {
-                    Image(systemName: "backward.fill")
-                }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue, size: 32))
-                .help("上一首")
-                .accessibilityLabel("上一首")
-
-                Button { model.sendMediaCommand(.playPause) } label: {
-                    Image(systemName: "playpause.fill")
-                }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.amber, isEmphasized: true, size: 36))
-                .help("暂停或开始")
-                .accessibilityLabel("暂停/开始")
-
-                Button { model.sendMediaCommand(.next) } label: {
-                    Image(systemName: "forward.fill")
-                }
-                .buttonStyle(LiquidGlassIconButtonStyle(tint: AmberVisualTheme.mistBlue, size: 32))
-                .help("下一首")
-                .accessibilityLabel("下一首")
-                Spacer()
-            }
-
-            Text(model.mediaStatus)
-                .font(ControlCenterTypography.compactCaption)
-                .foregroundStyle(palette.tertiaryText)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
         }
         .frame(maxHeight: .infinity)
         .padding(8)
@@ -460,12 +437,6 @@ private struct NowPlayingCard: View {
 
 private struct AudioProcessRow: View {
     let process: AudioProcess
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var palette: AmberThemePalette {
-        AmberVisualTheme.palette(for: colorScheme)
-    }
-
     var body: some View {
         HStack(spacing: 10) {
             AuroraSymbolTile(
@@ -477,20 +448,16 @@ private struct AudioProcessRow: View {
             )
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(process.name)
+                Text(process.displayName)
                     .font(ControlCenterTypography.cardTitle)
-                    .lineLimit(1)
-                Text(process.bundleID ?? process.executablePath ?? "PID \(process.pid)")
-                    .font(ControlCenterTypography.caption)
-                    .foregroundStyle(palette.secondaryText)
                     .lineLimit(1)
             }
 
             Spacer()
-            Text("\(process.pid)")
-                .font(ControlCenterTypography.numericCaption)
-                .foregroundStyle(palette.tertiaryText)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(process.displayName)
     }
 }
 
@@ -542,7 +509,7 @@ private struct ActivityTimeline: View {
             HStack {
                 CardTitle(
                     title: "活动时间线",
-                    subtitle: "永久保存在本机",
+                    subtitle: "永久保存在本机；普通标签页保存完整 URL（可能含搜索词、标识符或 token）",
                     systemImage: "clock.arrow.circlepath",
                     tint: AmberVisualTheme.mistBlue
                 )
@@ -551,10 +518,11 @@ private struct ActivityTimeline: View {
                     .font(ControlCenterTypography.numericCaption)
                     .foregroundStyle(palette.secondaryText)
                 Button {
-                    model.clearLog()
+                    Task { await model.clearObservationData() }
                 } label: {
-                    Label("清空", systemImage: "trash")
+                    Label(model.isClearingObservationData ? "正在清空" : "清空", systemImage: "trash")
                 }
+                .disabled(model.isClearingObservationData)
                 .buttonStyle(
                     LiquidGlassButtonStyle(
                         tint: AmberVisualTheme.danger,
@@ -562,6 +530,16 @@ private struct ActivityTimeline: View {
                         shape: .capsule
                     )
                 )
+            }
+
+            if !model.storageStatusText.isEmpty {
+                Text(model.storageStatusText)
+                    .font(ControlCenterTypography.caption)
+                    .foregroundStyle(
+                        model.storageStatusSeverity == .warning
+                            ? AmberVisualTheme.amber
+                            : AmberVisualTheme.danger
+                    )
             }
 
             Group {
@@ -651,7 +629,7 @@ private struct EventTimelineRow: View {
         switch event.kind {
         case .error:
             return AmberVisualTheme.danger
-        case .chromeTabAudible, .audioProcessDetected, .mediaCommandSent:
+        case .chromeTabAudible, .audioProcessDetected:
             return AmberVisualTheme.seaGlass
         case .restored, .lidOpened, .nightProtectionEnded:
             return AmberVisualTheme.mistBlue
@@ -694,7 +672,31 @@ private struct ChromeGuideView: View {
             }
 
             // Registration area
-            if model.chromeConnectionState != .connected && model.chromeConnectionState != .receivedEvent {
+            if let mismatch = manifestMismatch {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Chrome 通信路径与当前 App 位置不一致", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                        .font(ControlCenterTypography.body)
+                        .foregroundStyle(AmberVisualTheme.amber)
+                    Text("旧路径：\(mismatch.registered)")
+                        .font(ControlCenterTypography.codeCaption)
+                        .lineLimit(2)
+                    Text("新路径：\(mismatch.expected)")
+                        .font(ControlCenterTypography.codeCaption)
+                        .lineLimit(2)
+                    Button {
+                        model.repairChromeManifest()
+                    } label: {
+                        Label("修复 Chrome 通信路径", systemImage: "wrench.and.screwdriver.fill")
+                    }
+                    .buttonStyle(
+                        LiquidGlassButtonStyle(tint: AmberVisualTheme.amber, isEmphasized: true, shape: .capsule)
+                    )
+                }
+                .padding(10)
+                .background(palette.surfaceTertiary, in: RoundedRectangle(cornerRadius: 10))
+
+                Divider().opacity(0.3)
+            } else if model.chromeConnectionState != .connected && model.chromeConnectionState != .receivedEvent {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("扩展 ID")
                         .font(ControlCenterTypography.caption)
@@ -761,6 +763,13 @@ private struct ChromeGuideView: View {
         }
         .padding(20)
         .frame(width: 420)
+    }
+
+    private var manifestMismatch: (expected: String, registered: String)? {
+        guard case let .manifestPathMismatch(expected, registered) = model.health.chrome else {
+            return nil
+        }
+        return (expected, registered)
     }
 
     private var statusDotColor: Color {

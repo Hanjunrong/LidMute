@@ -8,41 +8,15 @@ public enum ProtectionState: String, Codable, Sendable {
 }
 
 public enum ProtectionSource: String, Codable, Hashable, Sendable {
-    case lid
+    case physicalLid
+    case simulation
     case night
 }
 
-public enum MediaCommand: Int, Codable, CaseIterable, Sendable {
-    case previous = 18
-    case next = 17
-    case playPause = 16
-}
-
-public struct MediaKeyEventDescriptor: Equatable, Sendable {
-    public let modifierFlags: UInt
-    public let data1: Int
-
-    public init(modifierFlags: UInt, data1: Int) {
-        self.modifierFlags = modifierFlags
-        self.data1 = data1
-    }
-
-    public static func events(for command: MediaCommand) -> [Self] {
-        [0xA, 0xB].map { keyState in
-            let flags = keyState << 8
-            return Self(
-                modifierFlags: UInt(flags),
-                data1: (command.rawValue << 16) | flags
-            )
-        }
-    }
-}
-
-public enum MediaPauseTrigger: String, Codable, Sendable {
-    case lidProtectionStarted
-    case simulatedLidProtectionStarted
-    case nightProtectionStarted
-    case chromeAudioStarted
+public enum SimulationLidState: Sendable {
+    case closed
+    case opened
+    case reset
 }
 
 public enum LidMuteEventKind: String, Codable, Sendable {
@@ -58,9 +32,6 @@ public enum LidMuteEventKind: String, Codable, Sendable {
     case simulation
     case nightProtectionStarted
     case nightProtectionEnded
-    case mediaCommandSent
-    case mediaPauseRequested
-    case mediaPauseRequestFailed
 }
 
 public enum CorrelationStatus: String, Codable, Sendable {
@@ -111,6 +82,34 @@ public struct AudioProcess: Codable, Equatable, Sendable {
         self.launchDate = launchDate
         self.isOutputActive = isOutputActive
     }
+
+    /// A user-facing process name that never exposes the internal PID fallback.
+    public var displayName: String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty && !trimmedName.lowercased().hasPrefix("pid ") {
+            return trimmedName
+        }
+
+        switch bundleID {
+        case "com.google.Chrome": return "Google Chrome"
+        case "com.apple.Music": return "Music"
+        case "com.apple.Safari": return "Safari"
+        case "com.bytedance.douyin.desktop": return "抖音"
+        case "cn.wenyu.bodian.bodianPc": return "波点音乐"
+        default:
+            if let executablePath {
+                let path = executablePath.lowercased()
+                if path.contains("douyin") || executablePath.contains("抖音") { return "抖音" }
+                if path.contains("bodian") || executablePath.contains("波点") { return "波点音乐" }
+                if path.contains("google chrome") || path.contains("chrome") { return "Google Chrome" }
+            }
+            if let bundleID {
+                let component = bundleID.split(separator: ".").last.map(String.init) ?? ""
+                if !component.isEmpty { return "未知音频应用（\(component)）" }
+            }
+            return "未知音频应用（PID \(pid)）"
+        }
+    }
 }
 
 public struct ChromeTabEvidence: Codable, Equatable, Sendable {
@@ -153,37 +152,13 @@ public struct ChromeTabEvidence: Codable, Equatable, Sendable {
     }
 }
 
-public struct MediaPauseRequest: Equatable, Sendable {
-    public let id: UUID
-    public let trigger: MediaPauseTrigger
-    public let source: ProtectionSource?
-    public let process: AudioProcess?
-    public let chromeTab: ChromeTabEvidence?
-    public let correlation: CorrelationStatus
-
-    public init(
-        id: UUID = UUID(),
-        trigger: MediaPauseTrigger,
-        source: ProtectionSource?,
-        process: AudioProcess?,
-        chromeTab: ChromeTabEvidence?,
-        correlation: CorrelationStatus
-    ) {
-        self.id = id
-        self.trigger = trigger
-        self.source = source
-        self.process = process
-        self.chromeTab = chromeTab
-        self.correlation = correlation
-    }
-}
-
 public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
     public let id: UUID
     public let timestamp: Date
     public let sequence: UInt64
     public let kind: LidMuteEventKind
     public let detail: String
+    public let observationEventID: UUID?
     public let process: AudioProcess?
     public let chromeTab: ChromeTabEvidence?
     public let correlation: CorrelationStatus
@@ -194,6 +169,7 @@ public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
         sequence: UInt64 = 0,
         kind: LidMuteEventKind,
         detail: String,
+        observationEventID: UUID? = nil,
         process: AudioProcess? = nil,
         chromeTab: ChromeTabEvidence? = nil,
         correlation: CorrelationStatus = .notApplicable
@@ -203,6 +179,7 @@ public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
         self.sequence = sequence
         self.kind = kind
         self.detail = detail
+        self.observationEventID = observationEventID
         self.process = process
         self.chromeTab = chromeTab
         self.correlation = correlation
@@ -212,13 +189,88 @@ public struct LidMuteEvent: Codable, Equatable, Sendable, Identifiable {
 public protocol EventStoring: AnyObject, Sendable {
     func append(_ event: LidMuteEvent) throws
     func load() throws -> [LidMuteEvent]
+    func recent(limit: Int) throws -> [LidMuteEvent]
     func clear() throws
 }
 
-public protocol AudioControlling: AnyObject, Sendable {
-    func builtInSpeaker() throws -> AudioDevice?
-    func captureState(of device: AudioDevice) throws -> AudioDeviceState
-    func enforceSilence(on device: AudioDevice) throws
-    func restore(_ state: AudioDeviceState, on device: AudioDevice) throws
+public extension EventStoring {
+    func recent(limit: Int) throws -> [LidMuteEvent] {
+        guard limit > 0 else { return [] }
+        return Array(try load().suffix(limit))
+    }
+}
+
+public protocol AudioProcessEvidenceProviding: AnyObject, Sendable {
     func activeOutputProcesses() throws -> [AudioProcess]
+}
+
+public protocol AudioControlling: AudioProcessEvidenceProviding {
+    func resolveBuiltInSpeaker(uid: String?) throws -> AudioDevice?
+    func captureState(of device: AudioDevice) throws -> AudioDeviceState
+    func writeMuted(_ muted: Bool, on device: AudioDevice) throws
+    func writeVolume(_ volume: Float, on device: AudioDevice) throws
+    func readState(of device: AudioDevice) throws -> AudioDeviceState
+    func supportsWritableMute(on device: AudioDevice) -> Bool
+}
+
+public enum SpeakerProtectionAction: Equatable, Sendable {
+    case begin(sources: Set<ProtectionSource>)
+    case reinforce
+    case end
+    case routeChangedWhileProtectionRequired(sources: Set<ProtectionSource>)
+}
+
+public enum SpeakerRecoveryOutcome: Equatable, Sendable {
+    case noPendingRecovery
+    case restored
+    case waitingForMatchingDevice
+    case corruptSnapshot
+    case unsupportedSnapshot(Int)
+    case failedButVerifiedSilent
+    case failedSafetyUnknown
+}
+
+public enum ChromeSafetyDeliveryResult: Equatable, Sendable {
+    case notRequired
+    case protected
+    case verifiedSilent
+    case unsafe
+
+    public var deliveryIsSafeToAcknowledge: Bool {
+        switch self {
+        case .notRequired, .protected, .verifiedSilent:
+            true
+        case .unsafe:
+            false
+        }
+    }
+}
+
+public enum AppLifecycleState: Equatable, Sendable {
+    case recovering
+    case shutdownUnresolved
+    case ready
+    case recoveryBlocked(SpeakerRecoveryOutcome)
+}
+
+public enum ApplicationShutdownResult: Equatable, Sendable {
+    case recovery(SpeakerRecoveryOutcome)
+    case timedOut
+}
+
+public enum TerminationDecision: Equatable, Sendable {
+    case allow
+    case cancel
+}
+
+public protocol SpeakerProtectionApplying: Sendable {
+    func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome
+}
+
+protocol SynchronousSpeakerProtectionApplying: SpeakerProtectionApplying {
+    func applySynchronously(_ action: SpeakerProtectionAction) -> SpeakerRecoveryOutcome
+}
+
+public protocol PendingSpeakerRecovering: Sendable {
+    func recoverPending() async -> SpeakerRecoveryOutcome
 }

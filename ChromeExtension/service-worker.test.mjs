@@ -1,6 +1,82 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { replayOutbox, toAudibleFrame } from './service-worker.mjs';
+import {
+  RETRY_ALARM_NAME,
+  RETRY_STATE_KEY,
+  createOutboxController,
+  createRetryScheduler,
+  replayOutbox,
+  toAudibleFrame
+} from './service-worker.mjs';
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+function listenerHarness() {
+  let listener;
+  return {
+    api: { addListener(value) { listener = value; } },
+    emit(...arguments_) {
+      assert.ok(listener, 'expected listener to be registered');
+      return listener(...arguments_);
+    }
+  };
+}
+
+function storageWith(outbox, getGate) {
+  let value = { sessionId: crypto.randomUUID(), seq: outbox.length, outbox };
+  return {
+    session: {
+      async get() {
+        if (getGate) await getGate.promise;
+        return structuredClone(value);
+      },
+      async set(patch) { value = { ...value, ...structuredClone(patch) }; }
+    },
+    snapshot: () => structuredClone(value)
+  };
+}
+
+function keyValueStorage(initial = {}) {
+  let value = structuredClone(initial);
+  return {
+    area: {
+      async get(keys) {
+        const requested = Array.isArray(keys) ? keys : [keys];
+        return Object.fromEntries(
+          requested.filter((key) => Object.hasOwn(value, key)).map((key) => [key, structuredClone(value[key])])
+        );
+      },
+      async set(patch) { value = { ...value, ...structuredClone(patch) }; },
+      async remove(key) { delete value[key]; }
+    },
+    snapshot: () => structuredClone(value)
+  };
+}
+
+function alarmHarness({ clearFailures = 0 } = {}) {
+  const alarms = new Map();
+  let remainingClearFailures = clearFailures;
+  return {
+    api: {
+      async get(name) { return alarms.get(name); },
+      create(name, info) { alarms.set(name, { name, ...structuredClone(info) }); },
+      async clear(name) {
+        if (remainingClearFailures > 0) {
+          remainingClearFailures -= 1;
+          throw new Error('injected alarm clear failure');
+        }
+        return alarms.delete(name);
+      }
+    },
+    get: (name) => structuredClone(alarms.get(name)),
+    dropAll: () => alarms.clear()
+  };
+}
 
 test('serializes a Chrome audible event with tab-level evidence', () => {
   const frame = toAudibleFrame({
@@ -20,4 +96,404 @@ test('replays every retained event through the outbox replay helper', () => {
   const posted = [];
   replayOutbox([{ eventId: 'one' }, { eventId: 'two' }], (event) => posted.push(event.eventId));
   assert.deepEqual(posted, ['one', 'two']);
+});
+
+test('serializes crossed acknowledgements without resurrecting either event', async () => {
+  const gate = deferred();
+  const storage = storageWith([{ eventId: 'one' }, { eventId: 'two' }], gate);
+  const controller = createOutboxController(storage.session, () => {}, () => {});
+  const first = controller.acknowledge({ type: 'ack', eventId: 'one', disposition: 'accepted' });
+  const second = controller.acknowledge({ type: 'ack', eventId: 'two', disposition: 'duplicate' });
+  gate.resolve();
+  await Promise.all([first, second]);
+  assert.deepEqual(storage.snapshot().outbox, []);
+});
+
+test('removes only terminal dispositions and keeps retryable failure', async () => {
+  for (const disposition of ['accepted', 'duplicate', 'ignored_incognito', 'rejected_permanent']) {
+    const storage = storageWith([{ eventId: disposition }]);
+    const controller = createOutboxController(storage.session, () => {}, () => {});
+    await controller.acknowledge({ type: 'ack', eventId: disposition, disposition });
+    assert.deepEqual(storage.snapshot().outbox, []);
+  }
+  const storage = storageWith([{ eventId: 'retry' }]);
+  const controller = createOutboxController(storage.session, () => {}, () => {});
+  await controller.acknowledge({ type: 'ack', eventId: 'retry', disposition: 'retryable_failure' });
+  assert.equal(storage.snapshot().outbox.length, 1);
+});
+
+test('terminal ack preserves durable retry while a retryable event remains', async () => {
+  const outboxStorage = storageWith([{ eventId: 'retryable' }, { eventId: 'terminal' }]);
+  const retryStorage = keyValueStorage();
+  const alarms = alarmHarness();
+  const scheduler = createRetryScheduler(
+    retryStorage.area,
+    alarms.api,
+    async () => {},
+    () => 10_000
+  );
+  const scheduledOutboxes = [];
+  let succeedCount = 0;
+  const controller = createOutboxController(
+    outboxStorage.session,
+    () => {},
+    async () => {
+      scheduledOutboxes.push(outboxStorage.snapshot().outbox.map((event) => event.eventId));
+      await scheduler.schedule();
+    },
+    async () => {
+      succeedCount += 1;
+      await scheduler.succeed();
+    }
+  );
+
+  const retryable = controller.acknowledge({
+    type: 'ack', eventId: 'retryable', disposition: 'retryable_failure'
+  });
+  const terminal = controller.acknowledge({
+    type: 'ack', eventId: 'terminal', disposition: 'accepted'
+  });
+  await Promise.all([retryable, terminal]);
+
+  assert.deepEqual(outboxStorage.snapshot().outbox, [{ eventId: 'retryable' }]);
+  assert.deepEqual(scheduledOutboxes, [
+    ['retryable', 'terminal'],
+    ['retryable']
+  ]);
+  assert.equal(succeedCount, 0);
+  assert.equal(retryStorage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 11_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 11_000);
+
+  await controller.acknowledge({
+    type: 'ack', eventId: 'retryable', disposition: 'accepted'
+  });
+  assert.deepEqual(outboxStorage.snapshot().outbox, []);
+  assert.equal(scheduledOutboxes.length, 2);
+  assert.equal(succeedCount, 1);
+  assert.equal(retryStorage.snapshot()[RETRY_STATE_KEY], undefined);
+  assert.equal(alarms.get(RETRY_ALARM_NAME), undefined);
+});
+
+test('enqueue concurrent with ack preserves the new item', async () => {
+  const storage = storageWith([{ eventId: 'old' }]);
+  const controller = createOutboxController(storage.session, () => {}, () => {});
+  await Promise.all([
+    controller.acknowledge({ type: 'ack', eventId: 'old', disposition: 'accepted' }),
+    controller.enqueue({ eventId: 'new' })
+  ]);
+  assert.deepEqual(storage.snapshot().outbox.map((item) => item.eventId), ['new']);
+});
+
+test('flush replays in order without deleting before acknowledgements', async () => {
+  const storage = storageWith([{ eventId: 'one' }, { eventId: 'two' }]);
+  const posted = [];
+  const controller = createOutboxController(storage.session, (item) => posted.push(item.eventId), () => {});
+  await controller.flush();
+  await controller.flush();
+  assert.deepEqual(posted, ['one', 'two', 'one', 'two']);
+  assert.deepEqual(storage.snapshot().outbox.map((item) => item.eventId), ['one', 'two']);
+});
+
+test('duplicate and out-of-order terminal acks converge to an empty outbox', async () => {
+  const storage = storageWith([{ eventId: 'one' }, { eventId: 'two' }]);
+  const controller = createOutboxController(storage.session, () => {}, () => {});
+  await Promise.all([
+    controller.acknowledge({ type: 'ack', eventId: 'two', disposition: 'accepted' }),
+    controller.acknowledge({ type: 'ack', eventId: 'one', disposition: 'accepted' }),
+    controller.acknowledge({ type: 'ack', eventId: 'two', disposition: 'duplicate' })
+  ]);
+  assert.deepEqual(storage.snapshot().outbox, []);
+});
+
+test('manifest grants alarms permission for suspension-safe retry', async () => {
+  const manifest = JSON.parse(await readFile(new URL('./manifest.json', import.meta.url)));
+  assert.equal(manifest.permissions.includes('alarms'), true);
+});
+
+test('retry persists its deadline and rebuilds a lost alarm after worker restart', async () => {
+  const storage = keyValueStorage();
+  const alarms = alarmHarness();
+  const clock = { now: 10_000 };
+  const firstWorker = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {},
+    () => clock.now
+  );
+
+  await firstWorker.schedule();
+  const persisted = storage.snapshot()[RETRY_STATE_KEY];
+  assert.equal(persisted.deadlineMilliseconds, 11_000);
+  assert.equal(persisted.nextDelayMilliseconds, 2_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 11_000);
+
+  alarms.dropAll(); // browser/session alarm loss while durable retry state remains
+  const restartedWorker = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {},
+    () => clock.now
+  );
+  await restartedWorker.restore();
+
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 11_000);
+  assert.deepEqual(storage.snapshot()[RETRY_STATE_KEY], persisted);
+});
+
+test('fire-and-forget restore failure is caught and startup recreates its durable alarm', async (t) => {
+  const sessionStorage = storageWith([{ eventId: 'retained' }]);
+  const retryDeadline = 4_102_444_800_000; // 2100-01-01T00:00:00Z
+  const retryStorage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: retryDeadline,
+      nextDelayMilliseconds: 2_000
+    }
+  });
+  const failedCreate = deferred();
+  const recreated = deferred();
+  const startupCompleted = deferred();
+  const alarms = new Map();
+  let createCount = 0;
+  let connectCount = 0;
+  const portDisconnect = listenerHarness();
+  const portMessage = listenerHarness();
+  const alarmEvent = listenerHarness();
+  const tabUpdated = listenerHarness();
+  const runtimeStartup = listenerHarness();
+  const runtimeInstalled = listenerHarness();
+  const unhandled = [];
+  const recordUnhandled = (error) => unhandled.push(error);
+  const hadChrome = Object.hasOwn(globalThis, 'chrome');
+  const previousChrome = globalThis.chrome;
+  process.on('unhandledRejection', recordUnhandled);
+  t.after(() => {
+    process.off('unhandledRejection', recordUnhandled);
+    if (hadChrome) globalThis.chrome = previousChrome;
+    else delete globalThis.chrome;
+  });
+
+  globalThis.chrome = {
+    storage: {
+      session: sessionStorage.session,
+      local: retryStorage.area
+    },
+    alarms: {
+      onAlarm: alarmEvent.api,
+      async get(name) { return alarms.get(name); },
+      create(name, info) {
+        createCount += 1;
+        if (createCount === 1) {
+          failedCreate.resolve();
+          return Promise.reject(new Error('injected alarm creation failure'));
+        }
+        alarms.set(name, { name, ...structuredClone(info) });
+        recreated.resolve();
+      },
+      async clear(name) { return alarms.delete(name); }
+    },
+    runtime: {
+      connectNative() {
+        connectCount += 1;
+        return {
+          onDisconnect: portDisconnect.api,
+          onMessage: portMessage.api,
+          postMessage() {}
+        };
+      },
+      onStartup: runtimeStartup.api,
+      onInstalled: runtimeInstalled.api
+    },
+    tabs: {
+      onUpdated: tabUpdated.api,
+      async query() {
+        startupCompleted.resolve();
+        return [];
+      }
+    }
+  };
+
+  await import(new URL('./service-worker.mjs?fire-and-forget-recovery-test', import.meta.url));
+  assert.equal(connectCount, 1);
+  await failedCreate.promise;
+  await new Promise(setImmediate);
+
+  const persisted = retryStorage.snapshot()[RETRY_STATE_KEY];
+  assert.equal(persisted.deadlineMilliseconds, retryDeadline);
+  assert.equal(alarms.get(RETRY_ALARM_NAME), undefined);
+  assert.deepEqual(sessionStorage.snapshot().outbox, [{ eventId: 'retained' }]);
+
+  runtimeStartup.emit();
+  await recreated.promise;
+  await startupCompleted.promise;
+  await new Promise(setImmediate);
+
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, persisted.deadlineMilliseconds);
+  assert.deepEqual(unhandled, []);
+});
+
+test('alarm wake clears the old deadline before reconnecting and keeps backoff across suspension', async () => {
+  const storage = keyValueStorage();
+  const alarms = alarmHarness();
+  const clock = { now: 20_000 };
+  const observed = [];
+  let restartedWorker;
+  const firstWorker = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {},
+    () => clock.now
+  );
+  await firstWorker.schedule();
+
+  restartedWorker = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {
+      observed.push(storage.snapshot()[RETRY_STATE_KEY]);
+      await restartedWorker.schedule();
+    },
+    () => clock.now
+  );
+  clock.now = 21_000;
+  await restartedWorker.fire({ name: RETRY_ALARM_NAME });
+
+  assert.deepEqual(observed, [{ nextDelayMilliseconds: 2_000 }]);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 23_000);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 4_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 23_000);
+});
+
+test('alarm wake reconnects and re-arms retry when clearing the fired alarm is rejected', async () => {
+  const storage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: 21_000,
+      nextDelayMilliseconds: 2_000
+    }
+  });
+  const alarms = alarmHarness({ clearFailures: 1 });
+  alarms.api.create(RETRY_ALARM_NAME, { when: 21_000 });
+  let retryCount = 0;
+  let scheduler;
+  scheduler = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {
+      retryCount += 1;
+      await scheduler.schedule();
+    },
+    () => 21_000
+  );
+
+  await scheduler.fire({ name: RETRY_ALARM_NAME });
+
+  assert.equal(retryCount, 1);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 23_000);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 4_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 23_000);
+});
+
+test('overdue restore reconnects and re-arms retry when clearing the old alarm is rejected', async () => {
+  const storage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: 21_000,
+      nextDelayMilliseconds: 2_000
+    }
+  });
+  const alarms = alarmHarness({ clearFailures: 1 });
+  alarms.api.create(RETRY_ALARM_NAME, { when: 21_000 });
+  let retryCount = 0;
+  let scheduler;
+  scheduler = createRetryScheduler(
+    storage.area,
+    alarms.api,
+    async () => {
+      retryCount += 1;
+      await scheduler.schedule();
+    },
+    () => 22_000
+  );
+
+  await scheduler.restore();
+
+  assert.equal(retryCount, 1);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 24_000);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 4_000);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 24_000);
+});
+
+test('terminal acknowledgement clears retry state and alarm and resets capped backoff', async () => {
+  const storage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: 65_000,
+      nextDelayMilliseconds: 60_000
+    }
+  });
+  const alarms = alarmHarness();
+  alarms.api.create(RETRY_ALARM_NAME, { when: 65_000 });
+  const scheduler = createRetryScheduler(storage.area, alarms.api, async () => {}, () => 5_000);
+
+  await scheduler.succeed();
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY], undefined);
+  assert.equal(alarms.get(RETRY_ALARM_NAME), undefined);
+
+  await scheduler.schedule();
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 6_000);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 2_000);
+});
+
+test('terminal empty outbox converges after alarm clear rejection without reconnecting', async () => {
+  const outboxStorage = storageWith([{ eventId: 'terminal' }]);
+  const retryStorage = keyValueStorage({
+    [RETRY_STATE_KEY]: {
+      deadlineMilliseconds: 65_000,
+      nextDelayMilliseconds: 60_000
+    }
+  });
+  const alarms = alarmHarness({ clearFailures: 1 });
+  alarms.api.create(RETRY_ALARM_NAME, { when: 65_000 });
+  let retryCount = 0;
+  const scheduler = createRetryScheduler(
+    retryStorage.area,
+    alarms.api,
+    async () => { retryCount += 1; },
+    () => 5_000
+  );
+  const controller = createOutboxController(
+    outboxStorage.session,
+    () => {},
+    () => scheduler.schedule(),
+    () => scheduler.succeed()
+  );
+
+  await controller.acknowledge({
+    type: 'ack', eventId: 'terminal', disposition: 'accepted'
+  });
+
+  assert.deepEqual(outboxStorage.snapshot().outbox, []);
+  assert.equal(retryStorage.snapshot()[RETRY_STATE_KEY], undefined);
+  assert.equal(alarms.get(RETRY_ALARM_NAME).when, 65_000);
+
+  const restartedWorker = createRetryScheduler(
+    retryStorage.area,
+    alarms.api,
+    async () => { retryCount += 1; },
+    () => 6_000
+  );
+  await restartedWorker.restore();
+
+  assert.equal(alarms.get(RETRY_ALARM_NAME), undefined);
+  assert.equal(retryCount, 0);
+});
+
+test('retry backoff never grows beyond sixty seconds', async () => {
+  const storage = keyValueStorage({
+    [RETRY_STATE_KEY]: { nextDelayMilliseconds: 60_000 }
+  });
+  const alarms = alarmHarness();
+  const scheduler = createRetryScheduler(storage.area, alarms.api, async () => {}, () => 100_000);
+
+  await scheduler.schedule();
+
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 160_000);
+  assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 60_000);
 });

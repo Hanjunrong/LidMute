@@ -1,32 +1,25 @@
 import AppKit
 import CoreAudio
+import Darwin
 import Foundation
 import LidMuteCore
 
 final class SystemAudioController: AudioControlling, @unchecked Sendable {
-    func builtInSpeaker() throws -> AudioDevice? {
-        let deviceID = try readDefaultOutputDevice()
-        guard deviceID != kAudioObjectUnknown else { return nil }
-
-        let transport = try readUInt32(
-            objectID: deviceID,
-            selector: kAudioDevicePropertyTransportType,
-            scope: kAudioObjectPropertyScopeGlobal
-        )
-        guard transport == kAudioDeviceTransportTypeBuiltIn else { return nil }
-        let name = try readString(objectID: deviceID, selector: kAudioObjectPropertyName)
-        guard let dataSourceName = try currentOutputDataSourceName(for: deviceID),
-              isClearlyInternalSpeaker(named: dataSourceName) else { return nil }
-
-        return AudioDevice(
-            id: deviceID,
-            uid: try readString(objectID: deviceID, selector: kAudioDevicePropertyDeviceUID),
-            name: name,
-            isBuiltIn: true
-        )
+    private let processLevelProbe = ProcessAudioLevelProbe()
+    func resolveBuiltInSpeaker(uid: String?) throws -> AudioDevice? {
+        let defaultOutputID = try readDefaultOutputDevice()
+        let candidates = try readAudioDeviceIDs().compactMap { deviceID in
+            try? makeCandidate(deviceID: deviceID, defaultOutputID: defaultOutputID)
+        }
+        return AudioDeviceResolver.resolve(candidates, uid: uid)
     }
 
     func captureState(of device: AudioDevice) throws -> AudioDeviceState {
+        try readState(of: device)
+    }
+
+    func readState(of device: AudioDevice) throws -> AudioDeviceState {
+        let device = try revalidatedBuiltInSpeaker(device)
         let muteAddress = outputAddress(kAudioDevicePropertyMute)
         let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
         let hasMute = hasProperty(device.id, muteAddress)
@@ -38,35 +31,28 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         return AudioDeviceState(muted: muted, volume: volume, usedVolumeFallback: !hasWritableMute)
     }
 
-    func enforceSilence(on device: AudioDevice) throws {
+    func writeMuted(_ muted: Bool, on device: AudioDevice) throws {
+        let device = try revalidatedBuiltInSpeaker(device)
         let muteAddress = outputAddress(kAudioDevicePropertyMute)
-        if hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
-            try writeUInt32(1, objectID: device.id, address: muteAddress)
-            return
+        guard hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) else {
+            throw SystemAudioError.noControllableOutput
         }
+        try writeUInt32(muted ? 1 : 0, objectID: device.id, address: muteAddress)
+    }
 
+    func writeVolume(_ volume: Float, on device: AudioDevice) throws {
+        let device = try revalidatedBuiltInSpeaker(device)
         let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
         guard hasProperty(device.id, volumeAddress), isSettable(device.id, volumeAddress) else {
             throw SystemAudioError.noControllableOutput
         }
-        try writeFloat(0, objectID: device.id, address: volumeAddress)
+        try writeFloat(volume, objectID: device.id, address: volumeAddress)
     }
 
-    func restore(_ state: AudioDeviceState, on device: AudioDevice) throws {
+    func supportsWritableMute(on device: AudioDevice) -> Bool {
+        guard let device = try? revalidatedBuiltInSpeaker(device) else { return false }
         let muteAddress = outputAddress(kAudioDevicePropertyMute)
-        let volumeAddress = outputAddress(kAudioDevicePropertyVolumeScalar)
-
-        // Keep the route silent before raising its volume on lid-open restoration.
-        if state.muted, hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
-            try writeUInt32(1, objectID: device.id, address: muteAddress)
-        }
-        if hasProperty(device.id, volumeAddress), isSettable(device.id, volumeAddress) {
-            try writeFloat(state.volume, objectID: device.id, address: volumeAddress)
-        }
-
-        if !state.muted, hasProperty(device.id, muteAddress), isSettable(device.id, muteAddress) {
-            try writeUInt32(state.muted ? 1 : 0, objectID: device.id, address: muteAddress)
-        }
+        return hasProperty(device.id, muteAddress) && isSettable(device.id, muteAddress)
     }
 
     func activeOutputProcesses() throws -> [AudioProcess] {
@@ -85,17 +71,72 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         return processIDs.compactMap { processID in
             guard let pid = try? readInt32(objectID: processID, selector: kAudioProcessPropertyPID),
                   let running = try? readUInt32(objectID: processID, selector: kAudioProcessPropertyIsRunningOutput, scope: kAudioObjectPropertyScopeGlobal),
-                  running != 0 else { return nil }
-            let application = NSRunningApplication(processIdentifier: pid_t(pid))
+                  running != 0,
+                  processLevelProbe.hasAudibleOutput(pid: pid_t(pid)) else { return nil }
+            let identity = processIdentity(pid: pid_t(pid))
             return AudioProcess(
                 pid: pid,
-                name: application?.localizedName ?? "PID \(pid)",
-                bundleID: application?.bundleIdentifier,
-                executablePath: application?.executableURL?.path,
-                launchDate: application?.launchDate,
+                name: identity.name,
+                bundleID: identity.bundleID,
+                executablePath: identity.executablePath,
+                launchDate: identity.launchDate,
                 isOutputActive: true
             )
         }
+    }
+
+    private struct ProcessIdentity {
+        let name: String
+        let bundleID: String?
+        let executablePath: String?
+        let launchDate: Date?
+    }
+
+    private func processIdentity(pid: pid_t) -> ProcessIdentity {
+        let application = NSRunningApplication(processIdentifier: pid)
+        let path = application?.executableURL?.path ?? executablePath(for: pid)
+        let bundleID = application?.bundleIdentifier ?? bundleIdentifier(for: path)
+        let name = application?.localizedName
+            ?? knownApplicationName(path: path, bundleID: bundleID)
+            ?? path.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
+            ?? "PID \(pid)"
+        return ProcessIdentity(
+            name: name,
+            bundleID: bundleID,
+            executablePath: path,
+            launchDate: application?.launchDate
+        )
+    }
+
+    private func executablePath(for pid: pid_t) -> String? {
+        // PROC_PIDPATHINFO_MAXSIZE is a C macro that Swift imports only as
+        // PROC_PIDPATHINFO_SIZE on current macOS SDKs.
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
+    private func bundleIdentifier(for path: String?) -> String? {
+        guard var url = path.map(URL.init(fileURLWithPath:)) else { return nil }
+        while url.path != "/" {
+            if url.pathExtension == "app", let identifier = Bundle(path: url.path)?.bundleIdentifier {
+                return identifier
+            }
+            url.deleteLastPathComponent()
+        }
+        return nil
+    }
+
+    private func knownApplicationName(path: String?, bundleID: String?) -> String? {
+        if bundleID == "com.bytedance.douyin.desktop" { return "抖音" }
+        if bundleID == "cn.wenyu.bodian.bodianPc" { return "波点音乐" }
+        guard let path else { return nil }
+        let lowercased = path.lowercased()
+        if lowercased.contains("douyin") || path.contains("抖音") { return "抖音" }
+        if lowercased.contains("bodian") || path.contains("波点") { return "波点音乐" }
+        if lowercased.contains("google chrome") || lowercased.contains("chrome") { return "Google Chrome" }
+        return nil
     }
 
     private func readDefaultOutputDevice() throws -> AudioDeviceID {
@@ -106,6 +147,67 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         )
     }
 
+    private func readAudioDeviceIDs() throws -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        let systemObject = AudioObjectID(kAudioObjectSystemObject)
+        try check(AudioObjectGetPropertyDataSize(systemObject, &address, 0, nil, &size))
+        guard size % UInt32(MemoryLayout<AudioDeviceID>.size) == 0 else {
+            throw SystemAudioError.invalidPropertyData
+        }
+
+        var deviceIDs = Array(
+            repeating: AudioDeviceID(kAudioObjectUnknown),
+            count: Int(size) / MemoryLayout<AudioDeviceID>.size
+        )
+        guard !deviceIDs.isEmpty else { return [] }
+        try check(AudioObjectGetPropertyData(systemObject, &address, 0, nil, &size, &deviceIDs))
+        return deviceIDs
+    }
+
+    private func makeCandidate(
+        deviceID: AudioDeviceID,
+        defaultOutputID: AudioDeviceID
+    ) throws -> AudioDeviceCandidate {
+        let uid = try readRequiredString(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyDeviceUID
+        )
+        let name = try readRequiredString(
+            objectID: deviceID,
+            selector: kAudioObjectPropertyName
+        )
+        let transport = try readUInt32(
+            objectID: deviceID,
+            selector: kAudioDevicePropertyTransportType,
+            scope: kAudioObjectPropertyScopeGlobal
+        )
+        let dataSourceName = try currentOutputDataSourceName(for: deviceID)
+
+        return AudioDeviceCandidate(
+            device: AudioDevice(
+                id: deviceID,
+                uid: uid,
+                name: name,
+                isBuiltIn: transport == kAudioDeviceTransportTypeBuiltIn
+            ),
+            isDefault: deviceID == defaultOutputID,
+            isInternalTransport: transport == kAudioDeviceTransportTypeBuiltIn,
+            dataSourceName: dataSourceName
+        )
+    }
+
+    private func revalidatedBuiltInSpeaker(_ device: AudioDevice) throws -> AudioDevice {
+        guard let resolved = try resolveBuiltInSpeaker(uid: device.uid) else {
+            throw SystemAudioError.builtInSpeakerNotValidated
+        }
+        return resolved
+    }
+
     private func outputAddress(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
         AudioObjectPropertyAddress(
             mSelector: selector,
@@ -114,14 +216,11 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         )
     }
 
-    private func isClearlyInternalSpeaker(named name: String) -> Bool {
-        let normalized = name.lowercased()
-        return normalized.contains("speaker") || normalized.contains("扬声器") || normalized.contains("喇叭")
-    }
-
-    private func currentOutputDataSourceName(for deviceID: AudioDeviceID) throws -> String? {
+    private func currentOutputDataSourceName(for deviceID: AudioDeviceID) throws -> String {
         let sourceAddress = outputAddress(kAudioDevicePropertyDataSource)
-        guard hasProperty(deviceID, sourceAddress) else { return nil }
+        guard hasProperty(deviceID, sourceAddress) else {
+            throw SystemAudioError.missingClassificationProperty
+        }
         var sourceID = try readUInt32(objectID: deviceID, address: sourceAddress)
         var sourceName: Unmanaged<CFString>?
         try withUnsafeMutablePointer(to: &sourceID) { sourcePointer in
@@ -137,8 +236,10 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
                 try check(AudioObjectGetPropertyData(deviceID, &nameAddress, 0, nil, &size, &translation))
             }
         }
-        guard let sourceName else { return nil }
-        return sourceName.takeRetainedValue() as String
+        guard let sourceName else { throw SystemAudioError.invalidPropertyData }
+        let name = sourceName.takeRetainedValue() as String
+        guard !name.isEmpty else { throw SystemAudioError.invalidPropertyData }
+        return name
     }
 
     private func hasProperty(_ objectID: AudioObjectID, _ address: AudioObjectPropertyAddress) -> Bool {
@@ -189,6 +290,15 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
         return value.takeRetainedValue() as String
     }
 
+    private func readRequiredString(
+        objectID: AudioObjectID,
+        selector: AudioObjectPropertySelector
+    ) throws -> String {
+        let value = try readString(objectID: objectID, selector: selector)
+        guard !value.isEmpty else { throw SystemAudioError.invalidPropertyData }
+        return value
+    }
+
     private func writeUInt32(_ value: UInt32, objectID: AudioObjectID, address: AudioObjectPropertyAddress) throws {
         var value = value
         var address = address
@@ -209,11 +319,17 @@ final class SystemAudioController: AudioControlling, @unchecked Sendable {
 enum SystemAudioError: LocalizedError {
     case coreAudio(OSStatus)
     case noControllableOutput
+    case builtInSpeakerNotValidated
+    case missingClassificationProperty
+    case invalidPropertyData
 
     var errorDescription: String? {
         switch self {
         case let .coreAudio(status): return "CoreAudio 错误：\(status)"
         case .noControllableOutput: return "内建扬声器没有可写的静音或音量控制"
+        case .builtInSpeakerNotValidated: return "无法重新验证内建扬声器"
+        case .missingClassificationProperty: return "音频设备缺少必需的分类属性"
+        case .invalidPropertyData: return "CoreAudio 返回了无效的设备属性"
         }
     }
 }

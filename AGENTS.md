@@ -90,5 +90,5 @@ The HStack splits into two columns (left `VStack` + `NowPlayingCard`). At the to
 ## Tests
 
 ```sh
-swift run LidMuteCoreBehaviorTests
+swift test
 ```

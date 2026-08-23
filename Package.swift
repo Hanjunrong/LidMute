@@ -7,16 +7,15 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [
         .library(name: "LidMuteCore", targets: ["LidMuteCore"]),
-        .executable(name: "LidMuteCoreBehaviorTests", targets: ["LidMuteCoreBehaviorTests"]),
         .executable(name: "LidMuteApp", targets: ["LidMuteApp"]),
         .executable(name: "LidMuteNativeHost", targets: ["LidMuteNativeHost"]),
     ],
     targets: [
         .target(name: "LidMuteCore"),
-        .executableTarget(
-            name: "LidMuteCoreBehaviorTests",
-            dependencies: ["LidMuteCore"],
-            path: "Tests/LidMuteCoreBehavior"
+        .testTarget(
+            name: "LidMuteCoreTests",
+            dependencies: ["LidMuteCore", "LidMuteApp"],
+            path: "Tests/LidMuteCoreTests"
         ),
         .executableTarget(
             name: "LidMuteApp",
@@ -24,10 +23,16 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("AudioToolbox"),
                 .linkedFramework("IOKit"),
                 .linkedFramework("SwiftUI"),
             ]
         ),
-        .executableTarget(name: "LidMuteNativeHost"),
+        .testTarget(
+            name: "LidMuteAppTests",
+            dependencies: ["LidMuteApp", "LidMuteCore"],
+            path: "Tests/LidMuteAppTests"
+        ),
+        .executableTarget(name: "LidMuteNativeHost", dependencies: ["LidMuteCore"]),
     ]
 )
