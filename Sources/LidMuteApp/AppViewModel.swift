@@ -82,6 +82,11 @@ private enum ChromeDiagnosticState: Equatable {
     case degraded
 }
 
+private enum NightScheduleInputValidation {
+    case valid(startMinutes: Int, endMinutes: Int)
+    case invalid(message: String)
+}
+
 struct ChromeHealthIOResult: Sendable {
     let manifest: ChromeManifestInspection
     let heartbeat: HeartbeatFreshness
@@ -146,6 +151,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published var nightScheduleEnabled = false
     @Published var nightStartText = "00:00"
     @Published var nightEndText = "08:00"
+    @Published private(set) var isNightScheduleInputValid = true
     @Published private(set) var isDisplaySleeping = false
     @Published private(set) var isNightProtectionActive = false
     @Published private(set) var nightScheduleStatus = "夜间静音未开启"
@@ -234,6 +240,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     private var isShuttingDown = false
     private var protectionEventTask: Task<Void, Never>?
     private var routeChangeTask: Task<Void, Never>?
+    private var audioPollTask: Task<Void, Never>?
+    private var audioPollWorkTask: Task<Result<[AudioProcess], AudioQueryFailure>, Never>?
+    private var chromeInboxPollTask: Task<Void, Never>?
+    private var chromeInboxWorkTask: Task<ChromeConsumeBatch, Error>?
+    private var nightProtectionTask: Task<Void, Never>?
+    private var observationClearWorkTask: Task<ObservationClearReport, Error>?
     private var routeChangePending = false
     private var isChromeInboxPollInFlight = false
     private var observationEpoch: UInt64 = 0
@@ -407,18 +419,16 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
         if audioTimer == nil {
             audioTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.pollAudioProcesses()
-                }
+                Task { @MainActor [weak self] in self?.pollAudioProcesses() }
             }
         }
         if nightTimer == nil {
             nightTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in await self?.refreshNightProtection() }
+                Task { @MainActor [weak self] in self?.scheduleNightProtectionRefresh() }
             }
         }
         pollAudioProcesses()
-        Task { @MainActor [weak self] in await self?.refreshNightProtection() }
+        scheduleNightProtectionRefresh()
     }
 
     func startRouteOnly() throws {
@@ -442,6 +452,22 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         protectionEventTask = nil
         routeChangeTask?.cancel()
         routeChangeTask = nil
+        audioPollTask?.cancel()
+        audioPollTask = nil
+        audioPollWorkTask?.cancel()
+        audioPollWorkTask = nil
+        chromeInboxPollTask?.cancel()
+        chromeInboxPollTask = nil
+        chromeInboxWorkTask?.cancel()
+        chromeInboxWorkTask = nil
+        nightProtectionTask?.cancel()
+        nightProtectionTask = nil
+        observationClearWorkTask?.cancel()
+        observationClearWorkTask = nil
+        healthRefreshTask?.cancel()
+        healthRefreshTask = nil
+        healthRefreshGeneration &+= 1
+        isChromeInboxPollInFlight = false
         routeChangePending = false
     }
 
@@ -564,18 +590,56 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     func setNightScheduleEnabled(_ enabled: Bool) {
+        guard isNightScheduleInputValid else {
+            nightScheduleEnabled = false
+            nightPreferences.saveEnabled(false)
+            enqueueProtectionEvent { model in await model.refreshNightProtection() }
+            return
+        }
         nightScheduleEnabled = enabled
         nightPreferences.saveEnabled(enabled)
         enqueueProtectionEvent { model in await model.refreshNightProtection() }
     }
 
     func nightScheduleTextChanged() {
-        if nightPreferences.saveSchedule(startText: nightStartText, endText: nightEndText),
-           let startMinutes = NightProtectionPreferences.minutes(from: nightStartText),
-           let endMinutes = NightProtectionPreferences.minutes(from: nightEndText) {
+        switch validateNightScheduleInput() {
+        case let .invalid(message):
+            isNightScheduleInputValid = false
+            nightScheduleStatus = message
+            if nightScheduleEnabled {
+                nightScheduleEnabled = false
+                nightPreferences.saveEnabled(false)
+            }
+        case let .valid(startMinutes, endMinutes):
+            isNightScheduleInputValid = true
+            guard nightPreferences.saveSchedule(startText: nightStartText, endText: nightEndText) else { return }
             effectiveNightSchedule = NightSchedule(startMinutes: startMinutes, endMinutes: endMinutes)
+            nightScheduleStatus = nightScheduleEnabled
+                ? "夜间时段：\(nightStartText)-\(nightEndText)（北京时间）"
+                : "夜间静音未开启"
         }
         enqueueProtectionEvent { model in await model.refreshNightProtection() }
+    }
+
+    private func validateNightScheduleInput() -> NightScheduleInputValidation {
+        guard Self.hasTimeShape(nightStartText), Self.hasTimeShape(nightEndText) else {
+            return .invalid(message: "请输入 HH:mm 格式")
+        }
+        guard let startMinutes = NightProtectionPreferences.minutes(from: nightStartText),
+              let endMinutes = NightProtectionPreferences.minutes(from: nightEndText) else {
+            return .invalid(message: "时间需在 00:00–23:59 之间")
+        }
+        guard NightSchedule.isValid(startMinutes: startMinutes, endMinutes: endMinutes) else {
+            return .invalid(message: "夜间时段需在 12 小时以内")
+        }
+        return .valid(startMinutes: startMinutes, endMinutes: endMinutes)
+    }
+
+    private static func hasTimeShape(_ text: String) -> Bool {
+        let characters = Array(text)
+        guard characters.count == 5, characters[2] == ":" else { return false }
+        return characters[0].isNumber && characters[1].isNumber &&
+            characters[3].isNumber && characters[4].isNumber
     }
 
     func clearObservationData() async {
@@ -601,12 +665,15 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         do {
             let observationStore = observationStore
             let acceptanceStore = acceptanceStore
-            let report = try await Task.detached(priority: .utility) {
+            let clearTask = Task.detached(priority: .utility) {
                 try observationStore.clearObservationData(
                     persistentReset: { try acceptanceStore.remove() },
                     inMemoryReset: {}
                 )
-            }.value
+            }
+            observationClearWorkTask = clearTask
+            defer { observationClearWorkTask = nil }
+            let report = try await clearTask.value
             clearReport = report
             applyObservationClearReport(report)
             setOperationalStorageStatus(
@@ -638,9 +705,12 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         let consumer = inboxConsumer
         let pollEpoch = observationEpoch
         do {
-            let batch = try await Task.detached(priority: .utility) {
+            let consumeTask = Task.detached(priority: .utility) {
                 try consumer.consumeAvailable()
-            }.value
+            }
+            chromeInboxWorkTask = consumeTask
+            defer { chromeInboxWorkTask = nil }
+            let batch = try await consumeTask.value
             guard lifecycleStateProvider.state == .ready,
                   !isShuttingDown,
                   !isClearingObservationData,
@@ -729,11 +799,16 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     func pollAudioProcesses() {
         guard lifecycleState == .ready, !isShuttingDown else { return }
+        guard audioPollTask == nil else { return }
         let poller = audioPoller
-        Task { [weak self] in
-            let result = await Task.detached(priority: .utility) {
+        audioPollTask = Task { @MainActor [weak self] in
+            defer { self?.audioPollTask = nil }
+            let pollTask = Task.detached(priority: .utility) {
                 poller.pollAudioProcesses()
-            }.value
+            }
+            self?.audioPollWorkTask = pollTask
+            defer { self?.audioPollWorkTask = nil }
+            let result = await pollTask.value
             guard let self, self.lifecycleState == .ready, !self.isShuttingDown else { return }
             self.receiveAudioPollResult(result)
         }
@@ -796,11 +871,24 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     private func refreshNightProtection() async {
         guard lifecycleState == .ready, !isShuttingDown else { return }
-        let validTime = NightProtectionPreferences.minutes(from: nightStartText) != nil &&
-            NightProtectionPreferences.minutes(from: nightEndText) != nil
-        nightScheduleStatus = validTime
-            ? (nightScheduleEnabled ? "夜间时段：\(nightStartText)-\(nightEndText)（北京时间）" : "夜间静音未开启")
-            : "时间格式应为 HH:mm"
+        guard isNightScheduleInputValid else {
+            if nightScheduleEnabled {
+                nightScheduleEnabled = false
+                nightPreferences.saveEnabled(false)
+            }
+            if case let .invalid(message) = validateNightScheduleInput() {
+                nightScheduleStatus = message
+            }
+            if isNightProtectionActive {
+                isNightProtectionActive = false
+                await coordinator.receiveNightProtection(false)
+                refresh()
+            }
+            return
+        }
+        nightScheduleStatus = nightScheduleEnabled
+            ? "夜间时段：\(nightStartText)-\(nightEndText)（北京时间）"
+            : "夜间静音未开启"
 
         let shouldProtect = isEnabled && nightScheduleEnabled && isDisplaySleeping && effectiveNightSchedule.isActive(at: Date())
         guard shouldProtect != isNightProtectionActive else { return }
@@ -815,9 +903,25 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
               !isClearingObservationData,
               inboxTimer == nil else { return }
         inboxTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in await self?.pollChromeInbox() }
+            Task { @MainActor [weak self] in self?.scheduleChromeInboxPoll() }
         }
-        Task { @MainActor [weak self] in await self?.pollChromeInbox() }
+        scheduleChromeInboxPoll()
+    }
+
+    private func scheduleChromeInboxPoll() {
+        guard chromeInboxPollTask == nil, !isShuttingDown else { return }
+        chromeInboxPollTask = Task { @MainActor [weak self] in
+            defer { self?.chromeInboxPollTask = nil }
+            await self?.pollChromeInbox()
+        }
+    }
+
+    private func scheduleNightProtectionRefresh() {
+        guard nightProtectionTask == nil, !isShuttingDown else { return }
+        nightProtectionTask = Task { @MainActor [weak self] in
+            defer { self?.nightProtectionTask = nil }
+            await self?.refreshNightProtection()
+        }
     }
 
     private func resolveChromeExtensionPath() {
@@ -863,6 +967,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     func refreshHealth() {
+        guard !isShuttingDown else { return }
         healthRefreshTask?.cancel()
         refreshLocalHealth()
         healthRefreshGeneration &+= 1

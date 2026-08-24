@@ -683,6 +683,31 @@ private func chromeAudioProcess() -> AudioProcess {
 
 @MainActor
 @Test
+func invalidNightScheduleInputDisablesNightToggleUntilCorrected() async throws {
+    let harness = try AppViewModelHarness(lifecycle: .ready)
+    harness.model.isEnabled = true
+    harness.model.nightScheduleEnabled = true
+
+    harness.model.nightStartText = "01:001"
+    harness.model.nightScheduleTextChanged()
+    #expect(!harness.model.isNightScheduleInputValid)
+    #expect(!harness.model.nightScheduleEnabled)
+    #expect(harness.model.nightScheduleStatus == "请输入 HH:mm 格式")
+
+    harness.model.nightStartText = "01:00"
+    harness.model.nightEndText = "25:00"
+    harness.model.nightScheduleTextChanged()
+    #expect(!harness.model.isNightScheduleInputValid)
+    #expect(harness.model.nightScheduleStatus == "时间需在 00:00–23:59 之间")
+
+    harness.model.nightEndText = "08:00"
+    harness.model.nightScheduleTextChanged()
+    #expect(harness.model.isNightScheduleInputValid)
+    #expect(!harness.model.nightScheduleEnabled)
+}
+
+@MainActor
+@Test
 func chromeConsumptionWaitsForReadyLifecycle() async throws {
     let harness = try AppViewModelHarness(lifecycle: .recovering)
 

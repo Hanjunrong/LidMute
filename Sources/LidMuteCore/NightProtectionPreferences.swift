@@ -26,10 +26,18 @@ public final class NightProtectionPreferences: @unchecked Sendable {
     }
 
     public func load() -> NightProtectionConfiguration {
-        NightProtectionConfiguration(
-            enabled: defaults.bool(forKey: Key.enabled),
-            startText: defaults.string(forKey: Key.start) ?? "00:00",
-            endText: defaults.string(forKey: Key.end) ?? "08:00"
+        let enabled = defaults.bool(forKey: Key.enabled)
+        let startText = defaults.string(forKey: Key.start) ?? "00:00"
+        let endText = defaults.string(forKey: Key.end) ?? "08:00"
+        guard let startMinutes = Self.minutes(from: startText),
+              let endMinutes = Self.minutes(from: endText),
+              NightSchedule.isValid(startMinutes: startMinutes, endMinutes: endMinutes) else {
+            return NightProtectionConfiguration(enabled: enabled, startText: "00:00", endText: "08:00")
+        }
+        return NightProtectionConfiguration(
+            enabled: enabled,
+            startText: startText,
+            endText: endText
         )
     }
 
@@ -39,8 +47,9 @@ public final class NightProtectionPreferences: @unchecked Sendable {
 
     @discardableResult
     public func saveSchedule(startText: String, endText: String) -> Bool {
-        guard Self.minutes(from: startText) != nil,
-              Self.minutes(from: endText) != nil else { return false }
+        guard let startMinutes = Self.minutes(from: startText),
+              let endMinutes = Self.minutes(from: endText),
+              NightSchedule.isValid(startMinutes: startMinutes, endMinutes: endMinutes) else { return false }
         defaults.set(startText, forKey: Key.start)
         defaults.set(endText, forKey: Key.end)
         return true

@@ -1,6 +1,8 @@
 import Foundation
 
 public struct NightSchedule: Codable, Equatable, Sendable {
+    public static let maximumDurationMinutes = 12 * 60
+
     public let startMinutes: Int
     public let endMinutes: Int
     public let timeZoneIdentifier: String
@@ -29,4 +31,11 @@ public struct NightSchedule: Codable, Equatable, Sendable {
     }
 
     public static let defaultBeijing = NightSchedule()
+
+    public static func isValid(startMinutes: Int, endMinutes: Int) -> Bool {
+        guard (0..<24 * 60).contains(startMinutes),
+              (0..<24 * 60).contains(endMinutes) else { return false }
+        let duration = (endMinutes - startMinutes + 24 * 60) % (24 * 60)
+        return duration > 0 && duration <= maximumDurationMinutes
+    }
 }

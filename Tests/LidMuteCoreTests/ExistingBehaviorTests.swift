@@ -188,6 +188,11 @@ final class ExistingBehaviorTests: XCTestCase {
         XCTAssertTrue(!(schedule.isActive(at: beijingDate(hour: 12))))
     }
 
+    func testNightScheduleRejectsAlmostFullDayWindow() throws {
+        XCTAssertFalse(NightSchedule.isValid(startMinutes: 9 * 60, endMinutes: 8 * 60 + 30))
+        XCTAssertTrue(NightSchedule.isValid(startMinutes: 23 * 60 + 30, endMinutes: 7 * 60 + 15))
+    }
+
     func testNightProtectionPreferencesPreserveLastValidSchedule() throws {
         let suiteName = "LidMuteTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -202,6 +207,7 @@ final class ExistingBehaviorTests: XCTestCase {
 
         preferences.saveEnabled(true)
         XCTAssertTrue(preferences.saveSchedule(startText: "23:30", endText: "07:15"), "valid night schedule was rejected")
+        XCTAssertTrue(!preferences.saveSchedule(startText: "09:00", endText: "08:30"), "almost full-day night schedule was persisted")
         XCTAssertTrue(!preferences.saveSchedule(startText: "25:00", endText: "07:15"), "invalid night schedule was persisted")
 
         XCTAssertTrue(preferences.load() == NightProtectionConfiguration(
@@ -209,6 +215,14 @@ final class ExistingBehaviorTests: XCTestCase {
             startText: "23:30",
             endText: "07:15"
         ), "invalid edit replaced the last valid schedule")
+
+        defaults.set("09:00", forKey: "nightStart")
+        defaults.set("08:30", forKey: "nightEnd")
+        XCTAssertTrue(preferences.load() == NightProtectionConfiguration(
+            enabled: true,
+            startText: "00:00",
+            endText: "08:00"
+        ), "legacy invalid schedule was not normalized on load")
     }
 
     func testAudioSourcePresentationPrefersReadableNames() throws {

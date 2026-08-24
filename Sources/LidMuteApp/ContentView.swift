@@ -254,7 +254,7 @@ private struct AutomationCard: View {
                     .tint(AmberVisualTheme.amber)
                     .accessibilityLabel("息屏夜间静音")
                     .accessibilityValue(model.nightScheduleEnabled ? "已开启" : "已关闭")
-                    .disabled(!model.isEnabled)
+                    .disabled(!model.isEnabled || !model.isNightScheduleInputValid)
                     .padding(5)
                     .amberGlassSurface(tint: AmberVisualTheme.amber, shape: .capsule)
             }
@@ -743,14 +743,8 @@ private struct ChromeGuideView: View {
                     "打开 chrome://extensions",
                     "开启右上角「开发者模式」",
                     "点击「加载已解压的扩展程序」",
-                    "选择以下目录：",
+                    "选择插件目录",
                 ])
-                Text(model.chromeExtensionPath)
-                    .font(ControlCenterTypography.codeCaption)
-                    .foregroundStyle(AmberVisualTheme.seaGlass)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .padding(.leading, 28)
 
                 GuideStep(number: "2", title: "注册通信主机", detail: [
                     "复制上一步出现的扩展 ID，粘贴到上方输入框",
