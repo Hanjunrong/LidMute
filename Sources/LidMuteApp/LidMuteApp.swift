@@ -15,6 +15,10 @@ final class LidMuteAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { await model.start() }
         presentationController.applyLightweightMode(model.isLightweightModeEnabled)
+        Task { @MainActor [presentationController] in
+            await Task.yield()
+            presentationController.promptForLoginItemRegistrationIfNeeded()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

@@ -78,36 +78,38 @@ private struct HeaderBar: View {
                 Text("LidMute")
                     .font(ControlCenterTypography.brand)
                     .tracking(-0.35)
-                Text("合盖监控系统外放守卫")
+                Text("mac合盖或夜间息屏自动静音")
                     .font(ControlCenterTypography.caption)
                     .foregroundStyle(palette.secondaryText)
             }
 
             Spacer()
 
-            Button {
-                showChromeGuide.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(chromeDotColor)
-                        .frame(width: 7, height: 7)
-                    Text(model.chromeBridgeStatus)
-                        .font(ControlCenterTypography.caption)
-                        .foregroundStyle(palette.secondaryText)
-                        .lineLimit(1)
+            if model.isChromeInstalled {
+                Button {
+                    showChromeGuide.toggle()
+                } label: {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(chromeDotColor)
+                            .frame(width: 7, height: 7)
+                        Text(model.chromeBridgeStatus)
+                            .font(ControlCenterTypography.caption)
+                            .foregroundStyle(palette.secondaryText)
+                            .lineLimit(1)
+                    }
                 }
-            }
-            .buttonStyle(
-                LiquidGlassButtonStyle(
-                    tint: AmberVisualTheme.mistBlue,
-                    shape: .capsule,
-                    horizontalPadding: 11,
-                    verticalPadding: 7
+                .buttonStyle(
+                    LiquidGlassButtonStyle(
+                        tint: AmberVisualTheme.mistBlue,
+                        shape: .capsule,
+                        horizontalPadding: 11,
+                        verticalPadding: 7
+                    )
                 )
-            )
-            .popover(isPresented: $showChromeGuide) {
-                ChromeGuideView(model: model)
+                .popover(isPresented: $showChromeGuide) {
+                    ChromeGuideView(model: model)
+                }
             }
         }
         .padding(.horizontal, 4)

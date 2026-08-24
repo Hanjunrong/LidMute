@@ -1,15 +1,28 @@
 import CoreAudio
 import Foundation
 
+struct AudioRouteChangeGate: Sendable {
+    private(set) var lastDefaultOutputID: AudioDeviceID?
+
+    mutating func shouldPublish(currentDefaultOutputID: AudioDeviceID?) -> Bool {
+        guard let currentDefaultOutputID,
+              currentDefaultOutputID != lastDefaultOutputID else { return false }
+        lastDefaultOutputID = currentDefaultOutputID
+        return true
+    }
+}
+
 @MainActor
 final class SystemAudioRouteMonitor {
     private let systemObject = AudioObjectID(kAudioObjectSystemObject)
     private let listenerQueue = DispatchQueue.main
     private let onChange: @MainActor () -> Void
+    private let readDefaultOutput: @MainActor () -> AudioDeviceID?
     private var acceptsChanges = false
     private var defaultOutputListenerRegistered = false
     private var devicesListenerRegistered = false
     private var pendingChange: Task<Void, Never>?
+    private var routeChangeGate = AudioRouteChangeGate()
 
     private lazy var defaultOutputListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
         Task { @MainActor [weak self] in
@@ -24,13 +37,21 @@ final class SystemAudioRouteMonitor {
         }
     }
 
-    init(onChange: @escaping @MainActor () -> Void) {
+    init(
+        onChange: @escaping @MainActor () -> Void,
+        readDefaultOutput: @escaping @MainActor () -> AudioDeviceID? = {
+            SystemAudioRouteMonitor.readCurrentDefaultOutput()
+        }
+    ) {
         self.onChange = onChange
+        self.readDefaultOutput = readDefaultOutput
     }
 
     func start() throws {
         guard !acceptsChanges else { return }
         try removeRegisteredListeners()
+        routeChangeGate = AudioRouteChangeGate()
+        _ = routeChangeGate.shouldPublish(currentDefaultOutputID: readDefaultOutput())
 
         var defaultOutputAddress = propertyAddress(kAudioHardwarePropertyDefaultOutputDevice)
         try check(AudioObjectAddPropertyListenerBlock(
@@ -61,6 +82,7 @@ final class SystemAudioRouteMonitor {
         acceptsChanges = false
         pendingChange?.cancel()
         pendingChange = nil
+        routeChangeGate = AudioRouteChangeGate()
         _ = removeDefaultOutputListener()
         _ = removeDevicesListener()
     }
@@ -71,8 +93,29 @@ final class SystemAudioRouteMonitor {
             await Task.yield()
             guard let self, acceptsChanges, !Task.isCancelled else { return }
             pendingChange = nil
+            guard routeChangeGate.shouldPublish(currentDefaultOutputID: readDefaultOutput()) else { return }
             onChange()
         }
+    }
+
+    private static func readCurrentDefaultOutput() -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &size,
+            &deviceID
+        )
+        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
     }
 
     private func removeRegisteredListeners() throws {

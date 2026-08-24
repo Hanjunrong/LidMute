@@ -152,6 +152,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     @Published var chromeExtensionId = ""
     @Published private(set) var chromeRegistrationStatus = ""
     @Published private(set) var chromeExtensionPath = ""
+    @Published private(set) var isChromeInstalled = false
     @Published private(set) var lifecycleState: AppLifecycleState = .recovering
     @Published private(set) var storageStatusText = ""
     @Published private(set) var storageStatusSeverity: StorageStatusSeverity = .none
@@ -263,12 +264,14 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         audioPoller: (any AudioProcessPolling)? = nil,
         uptime: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         expectedChromeHostPath: URL? = nil,
-        healthIOCollector: (any AppHealthIOCollecting)? = nil
+        healthIOCollector: (any AppHealthIOCollecting)? = nil,
+        chromeInstalled: Bool? = nil
     ) {
         let support = applicationSupport ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "LidMute", directoryHint: .isDirectory)
         self.applicationSupport = support
+        self.isChromeInstalled = chromeInstalled ?? Self.detectChromeInstallation()
         let resolvedManifestURL = chromeManifestURL ?? FileManager.default.homeDirectoryForCurrentUser
             .appending(path: "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.lidmute.nativehost.json")
         self.chromeManifestURL = resolvedManifestURL
@@ -370,6 +373,15 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         refreshHealth()
     }
 
+    private static func detectChromeInstallation() -> Bool {
+        let fileManager = FileManager.default
+        let home = fileManager.homeDirectoryForCurrentUser
+        return [
+            URL(filePath: "/Applications/Google Chrome.app"),
+            home.appending(path: "Applications/Google Chrome.app")
+        ].contains { fileManager.fileExists(atPath: $0.path) }
+    }
+
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
@@ -439,9 +451,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         }
         isShuttingDown = true
         lifecycleCoordinator.stop()
-        let pendingProtectionEvents = protectionEventTask
+        // Cancel queued observation work and move directly to the final recovery
+        // transaction. Waiting on the queue here can retain stale Chrome/audio
+        // deliveries and make AppKit's terminate-later reply feel hung.
         stopAll()
-        await pendingProtectionEvents?.value
         let outcome = await coordinator.endProtectionForShutdown()
         setRecoveryHealth(AppHealthMapper.recovery(outcome))
         isEnabled = false
@@ -456,6 +469,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             return
         }
         isShuttingDown = false
+        coordinator.resumeAfterCancelledShutdown()
         routeChangeTask = nil
         if case let .recovery(outcome) = result {
             lifecycleCoordinator.resume(after: outcome)
@@ -637,6 +651,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
                 checkChromeConnection()
                 return
             }
+            refreshHealth()
 
             for record in batch.records {
                 latestChromeEvidence = record.evidence
@@ -848,15 +863,16 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
     }
 
     func refreshHealth() {
+        healthRefreshTask?.cancel()
         refreshLocalHealth()
         healthRefreshGeneration &+= 1
         let generation = healthRefreshGeneration
         let collector = healthIOCollector
-        let nowUptime = uptime()
+        let uptime = self.uptime
         let expectedHostPath = expectedChromeHostPath
         healthRefreshTask = Task { @MainActor [weak self] in
             let result = await Task.detached(priority: .utility) {
-                collector.collect(nowUptime: nowUptime, expectedHostPath: expectedHostPath)
+                collector.collect(nowUptime: uptime(), expectedHostPath: expectedHostPath)
             }.value
             guard let self, self.healthRefreshGeneration == generation else { return }
             self.applyChromeHealthResult(result)

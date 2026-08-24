@@ -246,7 +246,8 @@ private final class AppHealthFixture {
         inboxConsumer: (any ChromeInboxConsuming)? = nil,
         observationPipelineCoordinator: (any ObservationPipelineCoordinating)? = nil,
         heartbeatStore: (any ChromeHostHeartbeatPersisting)? = nil,
-        healthIOCollector: (any AppHealthIOCollecting)? = nil
+        healthIOCollector: (any AppHealthIOCollecting)? = nil,
+        chromeInstalled: Bool? = nil
     ) -> AppViewModel {
         let store = EmptyHealthStore()
         return AppViewModel(
@@ -264,9 +265,17 @@ private final class AppHealthFixture {
             audioPoller: audioPoller,
             uptime: { [nowUptime] in nowUptime.value },
             expectedChromeHostPath: URL(filePath: expectedHostPath),
-            healthIOCollector: healthIOCollector
+            healthIOCollector: healthIOCollector,
+            chromeInstalled: chromeInstalled
         )
     }
+}
+
+@MainActor @Test func chromeInstallationStateCanHideTheChromeModule() {
+    let fixture = AppHealthFixture()
+    let model = fixture.makeViewModel(chromeInstalled: false)
+
+    #expect(model.isChromeInstalled == false)
 }
 
 @MainActor @Test func suspendedHealthIOCannotDelayALaterPhysicalLidClose() async {
@@ -387,6 +396,56 @@ private final class AppHealthFixture {
     #expect(model.health.chrome == .waitingForConnection)
     #expect(model.chromeConnectionState == .waitingForExtension)
     #expect(model.chromeBridgeStatus == "等待 Chrome 扩展连接")
+}
+
+@MainActor @Test func firstAcceptedEventPublishesNewlyRegisteredChromeState() async {
+    let token = UUID()
+    let fixture = AppHealthFixture(nowUptime: 100)
+    fixture.registration.inspection = .notRegistered
+    let model = fixture.makeViewModel(
+        inboxConsumer: OneBatchHealthConsumer(records: [ChromeInboxRecord(
+            generation: 0,
+            eventID: UUID(),
+            acceptedAt: Date(timeIntervalSince1970: 1_725_000_000),
+            evidence: ChromeTabEvidence(
+                sessionID: "new-session",
+                windowID: 1,
+                tabID: 2,
+                index: 0,
+                title: "First accepted event",
+                url: "https://example.com/first",
+                audible: true,
+                muted: false,
+                isActive: true,
+                isPinned: false,
+                isIncognito: false
+            )
+        )]),
+        observationPipelineCoordinator: HealthyHealthPipeline()
+    )
+    await model.waitForHealthRefresh()
+    #expect(model.health.chrome == .notRegistered)
+
+    fixture.registration.inspection = .current
+    fixture.heartbeat.heartbeat = .init(
+        version: ChromeHostHeartbeat.schemaVersion,
+        sessionToken: token,
+        pid: 8,
+        uptime: 100
+    )
+    fixture.acceptance.acceptance = .init(
+        version: ChromeHostAcceptance.schemaVersion,
+        sessionToken: token,
+        pid: 8,
+        uptime: 100
+    )
+
+    await model.pollChromeInbox()
+    await model.waitForHealthRefresh()
+
+    #expect(model.health.chrome == .recentlyAccepted(sessionToken: token, pid: 8))
+    #expect(model.chromeConnectionState == .receivedEvent)
+    #expect(model.chromeBridgeStatus == "最近收到 Chrome 事件")
 }
 
 @MainActor @Test func freshHeartbeatPublishesItsIdentityAndRecentAcceptanceExpires() async {

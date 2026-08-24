@@ -549,4 +549,37 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         XCTAssertFalse(fixture.coordinator.isEnabled)
         XCTAssertEqual(fixture.coordinator.state, .inactive)
     }
+
+    // This fails if shutdown drains stale queued reinforcements before restoring the speaker.
+    func testShutdownSkipsQueuedProtectionTransitions() async {
+        let applying = DelayedProtectionApplying(delay: .milliseconds(20))
+        let coordinator = ProtectionCoordinator(
+            protection: applying,
+            processEvidence: ScriptedAudioController(),
+            store: MemoryEventStore()
+        )
+        let activeProcess = AudioProcess(
+            pid: 42,
+            name: "Chrome",
+            bundleID: "com.google.Chrome",
+            executablePath: nil,
+            launchDate: nil,
+            isOutputActive: true
+        )
+
+        await coordinator.setEnabled(true)
+        let firstTransition = Task { await coordinator.receivePhysicalLid(closed: true) }
+        await applying.waitUntilStarted()
+        let queuedReinforcement = Task {
+            await coordinator.receiveAudioSnapshot([activeProcess])
+        }
+        let shutdown = Task { await coordinator.endProtectionForShutdown() }
+
+        await firstTransition.value
+        await queuedReinforcement.value
+        _ = await shutdown.value
+
+        let applyCount = await applying.observedApplyCount()
+        XCTAssertEqual(applyCount, 2)
+    }
 }

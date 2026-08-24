@@ -47,6 +47,7 @@ final class LockedFlag: @unchecked Sendable {
 actor DelayedProtectionApplying: SpeakerProtectionApplying {
     let delay: Duration
     private var started = false
+    private var applyCount = 0
 
     init(delay: Duration) {
         self.delay = delay
@@ -54,6 +55,7 @@ actor DelayedProtectionApplying: SpeakerProtectionApplying {
 
     func apply(_ action: SpeakerProtectionAction) async -> SpeakerRecoveryOutcome {
         started = true
+        applyCount += 1
         try? await Task.sleep(for: delay)
         return .noPendingRecovery
     }
@@ -61,6 +63,8 @@ actor DelayedProtectionApplying: SpeakerProtectionApplying {
     func waitUntilStarted() async {
         while !started { await Task.yield() }
     }
+
+    func observedApplyCount() -> Int { applyCount }
 }
 
 final class MemorySpeakerRecoveryStore: SpeakerRecoveryStoring, @unchecked Sendable {

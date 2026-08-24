@@ -30,6 +30,7 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     private var activeObservationClearBoundary: ObservationClearBoundary?
     private var deferredObservationEvents: [LidMuteEvent] = []
     private var lastStorageHealth: ObservationStorageHealth = .healthy
+    private var shutdownRequested = false
     private let maximumDeferredObservationEvents: Int
 
     public init(
@@ -99,7 +100,12 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     }
 
     public func endProtectionForShutdown() async -> SpeakerRecoveryOutcome {
-        await enqueue(.shutdown).outcome
+        shutdownRequested = true
+        return await enqueue(.shutdown).outcome
+    }
+
+    public func resumeAfterCancelledShutdown() {
+        shutdownRequested = false
     }
 
     public func flushObservationLogging() async {
@@ -157,6 +163,10 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
         let task = Task { @MainActor [weak self] in
             await predecessor?.value
             guard let self else { return ProtectionProcessingResult.unavailable }
+            let isShutdown = if case .shutdown = input { true } else { false }
+            guard isShutdown || !self.shutdownRequested else {
+                return ProtectionProcessingResult.unavailable
+            }
             return await self.process(input, observationGeneration: inputObservationGeneration)
         }
         transitionTask = Task { _ = await task.value }
