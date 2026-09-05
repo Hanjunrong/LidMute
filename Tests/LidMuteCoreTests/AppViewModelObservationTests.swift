@@ -1207,7 +1207,6 @@ func routeProtectionContinuesDuringSlowObservationClearWithoutDuplicateAction() 
     let store = AppPipelineEventStore(timeline: timeline)
     let pipeline = ProtectionCoordinator(
         protection: protection,
-        processEvidence: ScriptedAudioController(),
         store: store
     )
     await pipeline.setEnabled(true)
@@ -1264,7 +1263,6 @@ func physicalLidProtectionContinuesDuringSlowObservationClearAndPublishesAfterBo
     let store = AppPipelineEventStore(timeline: timeline)
     let pipeline = ProtectionCoordinator(
         protection: protection,
-        processEvidence: ScriptedAudioController(),
         store: store
     )
     await pipeline.setEnabled(true)
@@ -1323,7 +1321,6 @@ func failedObservationClearStillReleasesDeferredSafetyLogging() async throws {
     let store = AppPipelineEventStore()
     let pipeline = ProtectionCoordinator(
         protection: protection,
-        processEvidence: ScriptedAudioController(),
         store: store
     )
     await pipeline.setEnabled(true)

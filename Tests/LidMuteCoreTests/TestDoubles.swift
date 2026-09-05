@@ -277,7 +277,6 @@ struct OrderedProtectionFixture {
         self.recoveryStore = recoveryStore
         self.coordinator = ProtectionCoordinator(
             protection: runtime,
-            processEvidence: audio,
             store: MemoryEventStore()
         )
     }

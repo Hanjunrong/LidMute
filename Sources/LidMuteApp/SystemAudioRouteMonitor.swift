@@ -3,8 +3,26 @@ import Foundation
 
 struct AudioRouteChangeGate: Sendable {
     private(set) var lastDefaultOutputID: AudioDeviceID?
+    private var pendingDeviceListChange = false
 
-    mutating func shouldPublish(currentDefaultOutputID: AudioDeviceID?) -> Bool {
+    init(lastDefaultOutputID: AudioDeviceID? = nil) {
+        self.lastDefaultOutputID = lastDefaultOutputID
+    }
+
+    mutating func recordDeviceListChange() {
+        pendingDeviceListChange = true
+    }
+
+    mutating func shouldPublish(
+        currentDefaultOutputID: AudioDeviceID?,
+        reportDeviceListChanges: Bool = false
+    ) -> Bool {
+        let deviceListChanged = pendingDeviceListChange
+        pendingDeviceListChange = false
+        if reportDeviceListChanges, deviceListChanged {
+            lastDefaultOutputID = currentDefaultOutputID
+            return true
+        }
         guard let currentDefaultOutputID,
               currentDefaultOutputID != lastDefaultOutputID else { return false }
         lastDefaultOutputID = currentDefaultOutputID
@@ -18,6 +36,7 @@ final class SystemAudioRouteMonitor {
     private let listenerQueue = DispatchQueue.main
     private let onChange: @MainActor () -> Void
     private let readDefaultOutput: @MainActor () -> AudioDeviceID?
+    private var reportsDeviceListChanges = false
     private var acceptsChanges = false
     private var defaultOutputListenerRegistered = false
     private var devicesListenerRegistered = false
@@ -27,13 +46,13 @@ final class SystemAudioRouteMonitor {
     private lazy var defaultOutputListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
         Task { @MainActor [weak self] in
             guard self?.acceptsChanges == true else { return }
-            self?.scheduleChange()
+            self?.scheduleChange(deviceListChanged: false)
         }
     }
     private lazy var devicesListener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
         Task { @MainActor [weak self] in
             guard self?.acceptsChanges == true else { return }
-            self?.scheduleChange()
+            self?.scheduleChange(deviceListChanged: true)
         }
     }
 
@@ -47,7 +66,8 @@ final class SystemAudioRouteMonitor {
         self.readDefaultOutput = readDefaultOutput
     }
 
-    func start() throws {
+    func start(reportDeviceListChanges: Bool = false) throws {
+        reportsDeviceListChanges = reportDeviceListChanges
         guard !acceptsChanges else { return }
         try removeRegisteredListeners()
         routeChangeGate = AudioRouteChangeGate()
@@ -87,13 +107,20 @@ final class SystemAudioRouteMonitor {
         _ = removeDevicesListener()
     }
 
-    private func scheduleChange() {
-        guard acceptsChanges, pendingChange == nil else { return }
+    private func scheduleChange(deviceListChanged: Bool) {
+        guard acceptsChanges else { return }
+        if deviceListChanged {
+            routeChangeGate.recordDeviceListChange()
+        }
+        guard pendingChange == nil else { return }
         pendingChange = Task { @MainActor [weak self] in
             await Task.yield()
             guard let self, acceptsChanges, !Task.isCancelled else { return }
             pendingChange = nil
-            guard routeChangeGate.shouldPublish(currentDefaultOutputID: readDefaultOutput()) else { return }
+            guard routeChangeGate.shouldPublish(
+                currentDefaultOutputID: readDefaultOutput(),
+                reportDeviceListChanges: reportsDeviceListChanges
+            ) else { return }
             onChange()
         }
     }

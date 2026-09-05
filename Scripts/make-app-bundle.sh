@@ -81,13 +81,14 @@ icon_source="$root/Assets/AppIcon-1024.png"
   exit 66
 }
 
-stale_source="$(find "$root/Sources" -type f -newer "$binary" -print -quit)"
+# Keep these source sets in sync with Package.swift target dependencies.
+stale_source="$(find "$root/Sources/LidMuteApp" "$root/Sources/LidMuteCore" -type f -newer "$binary" -print -quit)"
 [[ -z "$stale_source" ]] || {
   print "Refusing to package stale binary: $binary is older than $stale_source" >&2
   exit 67
 }
 
-stale_source="$(find "$root/Sources" -type f -newer "$host" -print -quit)"
+stale_source="$(find "$root/Sources/LidMuteNativeHost" "$root/Sources/LidMuteCore" -type f -newer "$host" -print -quit)"
 [[ -z "$stale_source" ]] || {
   print "Refusing to package stale binary: $host is older than $stale_source" >&2
   exit 67

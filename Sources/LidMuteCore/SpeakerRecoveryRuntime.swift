@@ -174,14 +174,8 @@ public actor SpeakerRecoveryRuntime: SpeakerProtectionApplying, PendingSpeakerRe
             guard let device = try audio.resolveBuiltInSpeaker(uid: deviceUID) else {
                 return .waitingForMatchingDevice
             }
-            if audio.supportsWritableMute(on: device) {
-                try audio.writeMuted(true, on: device)
-            } else {
-                try audio.writeVolume(0, on: device)
-            }
-            return isVerifiedSilent(try audio.readState(of: device))
-                ? .failedButVerifiedSilent
-                : .failedSafetyUnknown
+            try silenceAndVerify(device)
+            return .failedButVerifiedSilent
         } catch {
             return .failedSafetyUnknown
         }

@@ -90,5 +90,7 @@ The HStack splits into two columns (left `VStack` + `NowPlayingCard`). At the to
 ## Tests
 
 ```sh
-swift test
+swift test --no-parallel
 ```
+
+Use `--no-parallel` for full-suite verification: existing fault-injection tests use blocking `NSCondition`/semaphore waits, and concurrent execution can exhaust the cooperative executor pool. Serializing test cases preserves each test's internal concurrency interleavings.

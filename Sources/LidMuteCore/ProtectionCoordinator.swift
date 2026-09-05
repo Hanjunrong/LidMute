@@ -14,7 +14,6 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     public var onRecoveryOutcome: ((SpeakerRecoveryOutcome) -> Void)?
 
     private let protection: Protection
-    private let processEvidence: any AudioProcessEvidenceProviding
     private let store: EventStoring
     private var activeSources: Set<ProtectionSource> = []
     private var observedPhysicalLidClosed: Bool?
@@ -35,12 +34,10 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
 
     public init(
         protection: Protection,
-        processEvidence: any AudioProcessEvidenceProviding,
         store: EventStoring,
         maximumDeferredObservationEvents: Int = 5_000
     ) {
         self.protection = protection
-        self.processEvidence = processEvidence
         self.store = store
         self.maximumDeferredObservationEvents = max(1, maximumDeferredObservationEvents)
     }
@@ -48,8 +45,8 @@ public final class ProtectionCoordinator<Protection: SpeakerProtectionApplying> 
     public convenience init(
         audio: Protection,
         store: EventStoring
-    ) where Protection: AudioProcessEvidenceProviding {
-        self.init(protection: audio, processEvidence: audio, store: store)
+    ) {
+        self.init(protection: audio, store: store)
     }
 
     public func setEnabled(_ enabled: Bool) async {

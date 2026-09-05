@@ -52,7 +52,7 @@ function chromeRuntimeError() {
   return chrome.runtime?.lastError;
 }
 
-function getAlarm(alarms, name) {
+function alarmResult(alarms, method, name) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const complete = (value) => {
@@ -63,26 +63,7 @@ function getAlarm(alarms, name) {
       else resolve(value);
     };
     try {
-      const result = alarms.get(name, complete);
-      if (result?.then) result.then(complete, reject);
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function clearAlarm(alarms, name) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const complete = (value) => {
-      if (settled) return;
-      settled = true;
-      const error = chromeRuntimeError();
-      if (error) reject(new Error(error.message));
-      else resolve(value);
-    };
-    try {
-      const result = alarms.clear(name, complete);
+      const result = alarms[method](name, complete);
       if (result?.then) result.then(complete, reject);
     } catch (error) {
       reject(error);
@@ -115,7 +96,7 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
   }
 
   async function ensureAlarm(deadlineMilliseconds) {
-    const existing = await getAlarm(alarms, RETRY_ALARM_NAME);
+    const existing = await alarmResult(alarms, 'get', RETRY_ALARM_NAME);
     if (!existing) await createAlarm(deadlineMilliseconds);
   }
 
@@ -123,7 +104,7 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
     const nextDelayMilliseconds = normalizedDelay(stateBeforeWake.nextDelayMilliseconds);
     await storage.set({ [RETRY_STATE_KEY]: { nextDelayMilliseconds } });
     try {
-      await clearAlarm(alarms, RETRY_ALARM_NAME);
+      await alarmResult(alarms, 'clear', RETRY_ALARM_NAME);
     } catch {
       // Reconnecting must not depend on removing an already-fired or stale alarm.
     }
@@ -154,7 +135,7 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
       const prepared = serial(async () => {
         const current = await state();
         if (!Number.isFinite(current.deadlineMilliseconds)) {
-          await clearAlarm(alarms, RETRY_ALARM_NAME);
+          await alarmResult(alarms, 'clear', RETRY_ALARM_NAME);
           return false;
         }
         if (current.deadlineMilliseconds <= now()) {
@@ -171,7 +152,7 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
       const prepared = serial(async () => {
         const current = await state();
         if (!Number.isFinite(current.deadlineMilliseconds)) {
-          await clearAlarm(alarms, RETRY_ALARM_NAME);
+          await alarmResult(alarms, 'clear', RETRY_ALARM_NAME);
           return false;
         }
         await prepareRetryAfterWake(current);
@@ -183,7 +164,7 @@ export function createRetryScheduler(storage, alarms, retry, now = Date.now) {
       return serial(async () => {
         await storage.remove(RETRY_STATE_KEY);
         try {
-          await clearAlarm(alarms, RETRY_ALARM_NAME);
+          await alarmResult(alarms, 'clear', RETRY_ALARM_NAME);
         } catch {
           // With no retained work, a later restore may remove a stale alarm without retrying.
         }
@@ -307,10 +288,6 @@ function connect() {
 
 async function flushOutbox() {
   await controller().flush();
-}
-
-async function acknowledge(message) {
-  await controller().acknowledge(message);
 }
 
 async function sendAudibleTab(tab) {

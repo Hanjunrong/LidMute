@@ -12,23 +12,16 @@ final class ProcessAudioLevelProbe: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var active = false
 
     func hasAudibleOutput(pid: pid_t, duration: TimeInterval = 0.12) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard !active else { return true }
-        active = true
-        defer { active = false }
 
         let tap = ProcessAudioTap()
         let peak = PeakBox()
         do {
-            try tap.start(pid: pid) { samples in
-                for sample in samples {
-                    let magnitude = abs(sample)
-                    if magnitude > peak.value { peak.value = magnitude }
-                }
+            try tap.start(pid: pid) { bufferPeak in
+                peak.value = max(peak.value, bufferPeak)
             }
             Thread.sleep(forTimeInterval: duration)
             tap.stop()
@@ -39,6 +32,23 @@ final class ProcessAudioLevelProbe: @unchecked Sendable {
             // to IsRunningOutput here would reintroduce the paused-player bug.
             return false
         }
+    }
+
+    // Measure every channel independently: mixing channels can cancel audible
+    // out-of-phase samples, and non-interleaved audio spans multiple buffers.
+    static func peak(in inputData: UnsafePointer<AudioBufferList>) -> Float {
+        let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+        var peak: Float = 0
+        for buffer in buffers {
+            guard let data = buffer.mData else { continue }
+            let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            let samples = data.assumingMemoryBound(to: Float.self)
+            for index in 0..<count {
+                let magnitude = abs(samples[index])
+                if magnitude.isFinite { peak = max(peak, magnitude) }
+            }
+        }
+        return peak
     }
 
     static func isAudible(peak: Float, threshold: Float = 0.0005) -> Bool {
@@ -73,9 +83,8 @@ private final class ProcessAudioTap {
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private let ioQueue = DispatchQueue(label: "local.lidmute.process-audio-tap", qos: .userInteractive)
-    private var scratch: UnsafeMutableBufferPointer<Float>?
 
-    func start(pid: pid_t, handler: @escaping @Sendable (UnsafeBufferPointer<Float>) -> Void) throws {
+    func start(pid: pid_t, handler: @escaping @Sendable (Float) -> Void) throws {
         let processObjectID = try translatePID(pid)
         let description = CATapDescription(stereoMixdownOfProcesses: [processObjectID])
         description.uuid = UUID()
@@ -112,32 +121,10 @@ private final class ProcessAudioTap {
             &bufferFrames
         )
 
-        let scratch = UnsafeMutableBufferPointer<Float>.allocate(capacity: 4096)
-        self.scratch = scratch
         var newIOProcID: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcIDWithBlock(&newIOProcID, aggregateID, ioQueue) {
-            [weak self] _, inputData, _, _, _ in
-            guard let self, let scratch = self.scratch else { return }
-            let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
-            for buffer in buffers {
-                guard let data = buffer.mData else { continue }
-                let sampleCount = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-                let samples = data.bindMemory(to: Float.self, capacity: sampleCount)
-                let channels = max(Int(buffer.mNumberChannels), 1)
-                let frames = min(sampleCount / channels, scratch.count)
-                if channels == 1 {
-                    for index in 0..<frames { scratch[index] = samples[index] }
-                } else {
-                    let scale = 1 / Float(channels)
-                    for frame in 0..<frames {
-                        var sum: Float = 0
-                        for channel in 0..<channels { sum += samples[frame * channels + channel] }
-                        scratch[frame] = sum * scale
-                    }
-                }
-                handler(UnsafeBufferPointer(rebasing: scratch[0..<frames]))
-                break
-            }
+            _, inputData, _, _, _ in
+            handler(ProcessAudioLevelProbe.peak(in: inputData))
         }
         try check(status, "create process tap IO")
         guard let newIOProcID else { throw TapError.invalidIOProc }
@@ -159,8 +146,6 @@ private final class ProcessAudioTap {
             _ = AudioHardwareDestroyProcessTap(tapID)
             tapID = kAudioObjectUnknown
         }
-        scratch?.deallocate()
-        scratch = nil
     }
 
     private enum TapError: Error { case invalidIOProc }

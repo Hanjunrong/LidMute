@@ -347,7 +347,6 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         self.recoveryRuntime = recoveryRuntime
         let coordinator = ProtectionCoordinator(
             protection: recoveryRuntime,
-            processEvidence: audioController,
             store: store
         )
         self.coordinator = coordinator
@@ -433,7 +432,7 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
 
     func startRouteOnly() throws {
         guard !isShuttingDown else { return }
-        try routeMonitor.start()
+        try routeMonitor.start(reportDeviceListChanges: true)
     }
 
     func stopAll() {
@@ -476,11 +475,10 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
             return .recovery(await recoveryRuntime.recoverPending())
         }
         isShuttingDown = true
+        // Stop monitors and cancel queued observation work before final recovery.
+        // Waiting on the queue can retain stale Chrome/audio deliveries and delay
+        // AppKit's terminate-later reply.
         lifecycleCoordinator.stop()
-        // Cancel queued observation work and move directly to the final recovery
-        // transaction. Waiting on the queue here can retain stale Chrome/audio
-        // deliveries and make AppKit's terminate-later reply feel hung.
-        stopAll()
         let outcome = await coordinator.endProtectionForShutdown()
         setRecoveryHealth(AppHealthMapper.recovery(outcome))
         isEnabled = false
@@ -802,14 +800,22 @@ final class AppViewModel: ObservableObject, ApplicationMonitoring, ApplicationSh
         guard audioPollTask == nil else { return }
         let poller = audioPoller
         audioPollTask = Task { @MainActor [weak self] in
-            defer { self?.audioPollTask = nil }
+            guard !Task.isCancelled else { return }
+            defer {
+                // stopAll already cleared a cancelled task's slots. A newer
+                // poll may now own them while the old synchronous query exits.
+                if !Task.isCancelled {
+                    self?.audioPollTask = nil
+                    self?.audioPollWorkTask = nil
+                }
+            }
             let pollTask = Task.detached(priority: .utility) {
                 poller.pollAudioProcesses()
             }
             self?.audioPollWorkTask = pollTask
-            defer { self?.audioPollWorkTask = nil }
             let result = await pollTask.value
-            guard let self, self.lifecycleState == .ready, !self.isShuttingDown else { return }
+            guard !Task.isCancelled,
+                  let self, self.lifecycleState == .ready, !self.isShuttingDown else { return }
             self.receiveAudioPollResult(result)
         }
     }

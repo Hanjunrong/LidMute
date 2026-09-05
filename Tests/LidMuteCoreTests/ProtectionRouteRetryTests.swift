@@ -15,7 +15,6 @@ final class ProtectionRouteRetryTests: XCTestCase {
         )
         let coordinator = ProtectionCoordinator(
             protection: runtime,
-            processEvidence: audio,
             store: MemoryEventStore()
         )
 
@@ -40,7 +39,6 @@ final class ProtectionRouteRetryTests: XCTestCase {
         )
         let coordinator = ProtectionCoordinator(
             protection: runtime,
-            processEvidence: audio,
             store: MemoryEventStore()
         )
         await coordinator.setEnabled(true)

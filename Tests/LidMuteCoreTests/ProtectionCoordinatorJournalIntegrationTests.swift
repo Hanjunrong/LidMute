@@ -210,7 +210,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         let protection = UnavailableThenMatchingChromeProtectionApplying()
         let coordinator = ProtectionCoordinator(
             protection: protection,
-            processEvidence: ScriptedAudioController(),
             store: MemoryEventStore()
         )
         await coordinator.setEnabled(true)
@@ -248,7 +247,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
             let store = RecoveringHealthEventStore(firstError: error)
             let coordinator = ProtectionCoordinator(
                 protection: protection,
-                processEvidence: ScriptedAudioController(),
                 store: store
             )
             var observedHealth: [ObservationStorageHealth] = []
@@ -270,7 +268,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         let store = PausingPipelineEventStore()
         let coordinator = ProtectionCoordinator(
             protection: protection,
-            processEvidence: ScriptedAudioController(),
             store: store,
             maximumDeferredObservationEvents: 3
         )
@@ -299,7 +296,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         let timeline = SharedOperationTimeline()
         let coordinator = ProtectionCoordinator(
             protection: TimelineProtectionApplying(timeline: timeline),
-            processEvidence: ScriptedAudioController(),
             store: MemoryEventStore()
         )
         await coordinator.setEnabled(true)
@@ -324,7 +320,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
     func testFailedInboxClearRetainsCoordinatorChromeEvidence() async {
         let coordinator = ProtectionCoordinator(
             protection: TimelineProtectionApplying(timeline: SharedOperationTimeline()),
-            processEvidence: ScriptedAudioController(),
             store: MemoryEventStore()
         )
         await coordinator.setEnabled(true)
@@ -352,7 +347,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         let store = PausingPipelineEventStore()
         let coordinator = ProtectionCoordinator(
             protection: protection,
-            processEvidence: ScriptedAudioController(),
             store: store
         )
         await coordinator.setEnabled(true)
@@ -398,7 +392,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         let store = PausingObservationEventStore(timeline: timeline)
         let coordinator = ProtectionCoordinator(
             protection: protection,
-            processEvidence: ScriptedAudioController(),
             store: store
         )
 
@@ -442,7 +435,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         let audio = ScriptedAudioController()
         let coordinator = ProtectionCoordinator(
             protection: applying,
-            processEvidence: audio,
             store: MemoryEventStore()
         )
         await coordinator.setEnabled(true)
@@ -555,7 +547,6 @@ final class ProtectionCoordinatorJournalIntegrationTests: XCTestCase {
         let applying = DelayedProtectionApplying(delay: .milliseconds(20))
         let coordinator = ProtectionCoordinator(
             protection: applying,
-            processEvidence: ScriptedAudioController(),
             store: MemoryEventStore()
         )
         let activeProcess = AudioProcess(

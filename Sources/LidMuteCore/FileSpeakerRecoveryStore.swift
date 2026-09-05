@@ -114,12 +114,7 @@ public final class FileSpeakerRecoveryStore: SpeakerRecoveryStoring, @unchecked 
     private func loadLocked() throws -> SpeakerRecoveryLoadResult {
         guard fileManager.fileExists(atPath: url.path) else { return .none }
 
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw error
-        }
+        let data = try Data(contentsOf: url)
 
         struct SchemaVersion: Decodable {
             let schemaVersion: Int

@@ -497,3 +497,20 @@ test('retry backoff never grows beyond sixty seconds', async () => {
   assert.equal(storage.snapshot()[RETRY_STATE_KEY].deadlineMilliseconds, 160_000);
   assert.equal(storage.snapshot()[RETRY_STATE_KEY].nextDelayMilliseconds, 60_000);
 });
+
+test('retry scheduler supports callback-only alarms and preserves their receiver', async () => {
+  const storage = keyValueStorage();
+  const alarms = {
+    entries: new Map(),
+    get(name, callback) { callback(this.entries.get(name)); },
+    clear(name, callback) { callback(this.entries.delete(name)); },
+    create(name, details) { this.entries.set(name, { name, ...details }); }
+  };
+  const scheduler = createRetryScheduler(storage.area, alarms, () => {}, () => 100);
+  await scheduler.schedule();
+  await scheduler.restore();
+  assert.equal(alarms.entries.get(RETRY_ALARM_NAME).when, 1100);
+  await scheduler.succeed();
+  assert.equal(alarms.entries.size, 0);
+  assert.deepEqual(storage.snapshot(), {});
+});

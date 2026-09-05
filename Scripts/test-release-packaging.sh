@@ -84,8 +84,86 @@ grep -Fq 'sign_adhoc_bundle "$root" "$staged_app"' "$root/Scripts/make-app-bundl
 grep -Fq 'sign_developer_id_bundle "$root" "$staged_app" "$LIDMUTE_DEVELOPER_IDENTITY"' "$root/Scripts/make-app-bundle.sh"
 grep -Fq 'notarize_and_staple "$staged_app" "$LIDMUTE_NOTARY_PROFILE" "$staging"' "$root/Scripts/make-app-bundle.sh"
 grep -Fq 'install_staged_bundle "$root" "$staged_app" "$app"' "$root/Scripts/make-app-bundle.sh"
+grep -Fq 'find "$root/Sources/LidMuteApp" "$root/Sources/LidMuteCore" -type f -newer "$binary"' "$root/Scripts/make-app-bundle.sh"
+grep -Fq 'find "$root/Sources/LidMuteNativeHost" "$root/Sources/LidMuteCore" -type f -newer "$host"' "$root/Scripts/make-app-bundle.sh"
 ! grep -Fq 'codesign --force --deep --sign' "$root/Scripts/make-app-bundle.sh"
 print "PASS release packaging source contract"
+
+incremental_repo="$fixture/incremental-repo"
+incremental_scratch="$fixture/incremental-scratch"
+incremental_clang_cache="$fixture/incremental-clang-cache"
+incremental_swift_cache="$fixture/incremental-swift-cache"
+incremental_app="$incremental_repo/dist/Incremental.app"
+mkdir -p "$incremental_repo/dist"
+cp -p "$root/Package.swift" "$incremental_repo/"
+cp -pR "$root/Assets" "$root/Config" "$root/Scripts" "$root/Sources" "$root/Tests" \
+  "$root/ChromeExtension" "$incremental_repo/"
+
+run_incremental_package() {
+  local output_log="$1"
+  LIDMUTE_SIGNING_MODE=adhoc \
+  LIDMUTE_SCRATCH_PATH="$incremental_scratch" \
+  CLANG_MODULE_CACHE_PATH="$incremental_clang_cache" \
+  SWIFTPM_CACHE_PATH="$incremental_swift_cache" \
+  SWIFTPM_MODULECACHE_OVERRIDE="$incremental_swift_cache" \
+  LIDMUTE_APP_PATH="$incremental_app" \
+  zsh "$incremental_repo/Scripts/make-app-bundle.sh" >"$output_log" 2>&1
+}
+
+run_incremental_package "$fixture/incremental-baseline.log"
+incremental_host_binary="$(find "$incremental_scratch" -type f -path '*/release/LidMuteNativeHost' -print -quit)"
+[[ -n "$incremental_host_binary" ]]
+incremental_build_root="${incremental_host_binary:h}"
+incremental_app_binary="$incremental_build_root/LidMuteApp"
+[[ -x "$incremental_app_binary" && -x "$incremental_host_binary" ]]
+
+incremental_app_source="$incremental_repo/Sources/LidMuteApp/AppViewModel.swift"
+incremental_core_source="$incremental_repo/Sources/LidMuteCore/Models.swift"
+incremental_host_source="$incremental_repo/Sources/LidMuteNativeHost/main.swift"
+touch "$incremental_app_source"
+rm -- "$incremental_app_binary"
+if run_incremental_package "$fixture/incremental-app-only.log"; then
+  app_only_status=0
+else
+  app_only_status=$?
+fi
+[[ "$app_only_status" -eq 0 ]]
+grep -Fq 'Created ./Incremental.app' "$fixture/incremental-app-only.log"
+print "PASS App-only incremental update is accepted with unchanged NativeHost"
+
+touch "$incremental_core_source"
+if run_incremental_package "$fixture/incremental-core-app.log"; then
+  core_app_status=0
+else
+  core_app_status=$?
+fi
+[[ "$core_app_status" -eq 67 ]]
+grep -Fq 'LidMuteApp is older than' "$fixture/incremental-core-app.log"
+grep -Fq 'LidMuteCore/Models.swift' "$fixture/incremental-core-app.log"
+print "PASS stale Core source is rejected for LidMuteApp"
+
+touch -r "$incremental_app_binary" "$incremental_core_source"
+if run_incremental_package "$fixture/incremental-core-host.log"; then
+  core_host_status=0
+else
+  core_host_status=$?
+fi
+[[ "$core_host_status" -eq 67 ]]
+grep -Fq 'LidMuteNativeHost is older than' "$fixture/incremental-core-host.log"
+grep -Fq 'LidMuteCore/Models.swift' "$fixture/incremental-core-host.log"
+print "PASS stale Core source is rejected for LidMuteNativeHost"
+
+touch -r "$incremental_host_binary" "$incremental_core_source"
+touch "$incremental_host_source"
+if run_incremental_package "$fixture/incremental-host-only.log"; then
+  host_only_status=0
+else
+  host_only_status=$?
+fi
+[[ "$host_only_status" -eq 67 ]]
+grep -Fq 'LidMuteNativeHost is older than' "$fixture/incremental-host-only.log"
+grep -Fq 'LidMuteNativeHost/main.swift' "$fixture/incremental-host-only.log"
+print "PASS stale NativeHost source is rejected"
 
 exec {forged_fd}<"$fixture/outside"
 (
